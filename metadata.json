@@ -1,0 +1,6 @@
+{
+  "name": "3D模型骨骼动画编辑器",
+  "description": "一个功能丰富、高交互性的网页端3D模型编辑器。支持导入3D模型、自定义创建各种几何形体、可视化添加与摆放骨骼、自动与手动骨骼权重绑定（Rigging）和多帧关键帧动画时间轴制作与预览。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
