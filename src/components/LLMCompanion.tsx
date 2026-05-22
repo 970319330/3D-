@@ -1,5 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Bot, Send, Settings, Sparkles, AlertCircle, RefreshCw, Eye, EyeOff, User, Film, HelpCircle, Sliders, Play, Trash2, Volume2, VolumeX } from 'lucide-react';
+import { MoodState, MoodDelta } from '../types';
+import MoodPanel from './MoodPanel';
+import { getMoodLabel, getMoodEmoji } from '../utils/moodEngine';
 
 interface LLMConfig {
   provider: 'gemini' | 'deepseek' | 'custom';
@@ -16,18 +19,26 @@ interface Message {
   animation?: string;
   error?: boolean;
   timestamp: Date;
+  moodDelta?: MoodDelta;
+  isProactive?: boolean;
 }
 
 interface LLMCompanionProps {
   detectedClips: string[];
   onTriggerAnimation: (clipName: string) => void;
+  moodState: MoodState;
+  onMoodDelta: (delta: MoodDelta) => void;
+  moodEventTrigger?: number;
 }
 
 const DEFAULT_SYSTEM_INSTRUCTION = "你是一个充满活力、有温度的三维手办伴侣、陪伴小精灵。请用亲切、拟人化、简短的语气与用户进行角色扮演互动，每次回答控制在100字以内。";
 
 export default function LLMCompanion({
   detectedClips,
-  onTriggerAnimation
+  onTriggerAnimation,
+  moodState,
+  onMoodDelta,
+  moodEventTrigger = 0,
 }: LLMCompanionProps) {
   // Stored state settings
   const [provider, setProvider] = useState<'gemini' | 'deepseek' | 'custom'>(() => {
@@ -74,7 +85,23 @@ export default function LLMCompanion({
   const [showKeySecret, setShowKeySecret] = useState<boolean>(false);
   const [inputMessage, setInputMessage] = useState<string>('');
   const [isTyping, setIsTyping] = useState<boolean>(false);
-  
+
+  // Proactive chat state
+  const [isProactiveThinking, setIsProactiveThinking] = useState<boolean>(false);
+  const lastProactiveTimeRef = useRef<number>(0);
+  const proactiveCooldownRef = useRef<number>(30000); // 30s min between proactive chats
+  const moodPanelRef = useRef<HTMLDivElement>(null);
+
+  // Refs for values used inside proactive interval (to avoid resetting the interval on every change)
+  const moodStateRef = useRef(moodState);
+  useEffect(() => { moodStateRef.current = moodState; }, [moodState]);
+
+  // Stable refs for config values needed in timer callbacks
+  const configRef = useRef({ provider, apiKey, baseUrl, model, systemInstruction, useVoice, dashscopeApiKey, selectedVoice });
+  useEffect(() => {
+    configRef.current = { provider, apiKey, baseUrl, model, systemInstruction, useVoice, dashscopeApiKey, selectedVoice };
+  }, [provider, apiKey, baseUrl, model, systemInstruction, useVoice, dashscopeApiKey, selectedVoice]);
+
   // Message history
   const [messages, setMessages] = useState<Message[]>(() => {
     const defaultGreetings: Message[] = [
@@ -87,6 +114,11 @@ export default function LLMCompanion({
     ];
     return defaultGreetings;
   });
+
+  const messagesLenRef = useRef(messages.length);
+  useEffect(() => { messagesLenRef.current = messages.length; }, [messages.length]);
+  const detectedClipsRef = useRef(detectedClips);
+  useEffect(() => { detectedClipsRef.current = detectedClips; }, [detectedClips]);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -190,7 +222,134 @@ export default function LLMCompanion({
   // Scroll messages
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, isTyping]);
+  }, [messages, isTyping, isProactiveThinking]);
+
+  // Proactive chat timer — check every 15 seconds (stable interval, never reset)
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const now = Date.now();
+      if (now - lastProactiveTimeRef.current < proactiveCooldownRef.current) return;
+      if (isTyping || isProactiveThinking) return;
+
+      const mood = moodStateRef.current;
+      const clips = detectedClipsRef.current;
+      const cfg = configRef.current;
+      const label = getMoodLabel(mood);
+      const isStrongMood = mood.happiness > 75 || mood.happiness < 25 ||
+                           mood.energy > 75 || mood.energy < 25 ||
+                           mood.anger > 60 || mood.sadness > 60;
+
+      if (isStrongMood && messagesLenRef.current > 1) {
+        lastProactiveTimeRef.current = now;
+
+        (async () => {
+          setIsProactiveThinking(true);
+          try {
+            const resp = await fetch('/api/llm/proactive-chat', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                provider: cfg.provider,
+                apiKey: cfg.apiKey,
+                baseUrl: cfg.baseUrl,
+                model: cfg.model,
+                systemInstruction: cfg.systemInstruction,
+                moodState: mood,
+                moodLabel: label,
+                animations: clips
+              })
+            });
+            if (!resp.ok) return;
+            const data = await resp.json();
+            const moodDelta = data?.moodDelta || {};
+            if (Object.keys(moodDelta).length > 0) {
+              onMoodDelta(moodDelta);
+            }
+            if (data?.animation && clips.includes(data.animation)) {
+              onTriggerAnimation(data.animation);
+            }
+            const aiMsg: Message = {
+              id: crypto.randomUUID(),
+              sender: 'ai',
+              text: data?.reply || '...',
+              animation: data?.animation || '',
+              timestamp: new Date(),
+              moodDelta,
+              isProactive: true
+            };
+            setMessages(prev => [...prev, aiMsg]);
+            if (cfg.useVoice && data?.reply) {
+              playTextSpeech(data.reply, aiMsg.id);
+            }
+          } catch (_) { /* silent */ }
+          finally { setIsProactiveThinking(false); }
+        })();
+      }
+    }, 15000);
+    return () => clearInterval(interval);
+    // Stable deps — all dynamic values read via refs to avoid restarting the interval
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Immediate proactive trigger when MoodEngine fires a threshold event (energy=0, etc.)
+  // Bypasses user-activity cooldown — threshold events are emotional moments that need immediate response
+  useEffect(() => {
+    if (moodEventTrigger === 0) return;
+    if (isTyping || isProactiveThinking) return;
+
+    const mood = moodStateRef.current;
+    const clips = detectedClipsRef.current;
+    const cfg = configRef.current;
+    const label = getMoodLabel(mood);
+    const isStrongMood = mood.happiness > 75 || mood.happiness < 25 ||
+                         mood.energy > 75 || mood.energy < 25 ||
+                         mood.anger > 60 || mood.sadness > 60;
+    if (!isStrongMood || messagesLenRef.current <= 1) return;
+
+    lastProactiveTimeRef.current = Date.now();
+
+    (async () => {
+      setIsProactiveThinking(true);
+      try {
+        const resp = await fetch('/api/llm/proactive-chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            provider: cfg.provider,
+            apiKey: cfg.apiKey,
+            baseUrl: cfg.baseUrl,
+            model: cfg.model,
+            systemInstruction: cfg.systemInstruction,
+            moodState: mood,
+            moodLabel: label,
+            animations: clips
+          })
+        });
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const moodDelta = data?.moodDelta || {};
+        if (Object.keys(moodDelta).length > 0) {
+          onMoodDelta(moodDelta);
+        }
+        if (data?.animation && clips.includes(data.animation)) {
+          onTriggerAnimation(data.animation);
+        }
+        const aiMsg: Message = {
+          id: crypto.randomUUID(),
+          sender: 'ai',
+          text: data?.reply || '...',
+          animation: data?.animation || '',
+          timestamp: new Date(),
+          moodDelta,
+          isProactive: true
+        };
+        setMessages(prev => [...prev, aiMsg]);
+        if (cfg.useVoice && data?.reply) {
+          playTextSpeech(data.reply, aiMsg.id);
+        }
+      } catch (_) { /* silent */ }
+      finally { setIsProactiveThinking(false); }
+    })();
+  }, [moodEventTrigger]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Handle LLM API query
   const handleSendMessage = async (e: React.FormEvent) => {
@@ -210,6 +369,9 @@ export default function LLMCompanion({
     setMessages(prev => [...prev, userMsg]);
     setIsTyping(true);
 
+    // Reset proactive cooldown since user is actively chatting
+    lastProactiveTimeRef.current = Date.now();
+
     try {
       const response = await fetch('/api/llm/chat', {
         method: 'POST',
@@ -223,7 +385,8 @@ export default function LLMCompanion({
           model,
           systemInstruction,
           prompt: userText,
-          animations: detectedClips
+          animations: detectedClips,
+          moodState: moodState
         })
       });
 
@@ -233,9 +396,15 @@ export default function LLMCompanion({
       }
 
       const resData = await response.json();
-      
+
       const aiReply = resData?.reply || '没有给出有效的文字回复。';
       const triggeredAnim = resData?.animation || '';
+      const moodDelta = resData?.moodDelta || {};
+
+      // Apply mood delta from LLM response
+      if (Object.keys(moodDelta).length > 0) {
+        onMoodDelta(moodDelta);
+      }
 
       // Append AI response
       const aiMsg: Message = {
@@ -243,7 +412,8 @@ export default function LLMCompanion({
         sender: 'ai',
         text: aiReply,
         animation: triggeredAnim,
-        timestamp: new Date()
+        timestamp: new Date(),
+        moodDelta
       };
       setMessages(prev => [...prev, aiMsg]);
 
@@ -274,7 +444,7 @@ export default function LLMCompanion({
 
   return (
     <div className="flex flex-col h-full bg-[#08101c]/90 border border-slate-800/80 rounded-xl overflow-hidden shadow-2xl relative">
-      
+
       {/* Mini Titlebar Header */}
       <div className="bg-[#0c1626] border-b border-slate-800 px-4 py-3 flex items-center justify-between shrink-0 select-none">
         <div className="flex items-center gap-2">
@@ -304,8 +474,8 @@ export default function LLMCompanion({
           <button
             onClick={() => setShowSettings(!showSettings)}
             className={`p-1.5 rounded transition cursor-pointer ${
-              showSettings 
-                ? 'bg-indigo-600 text-white' 
+              showSettings
+                ? 'bg-indigo-600 text-white'
                 : 'bg-slate-800 text-slate-400 hover:text-slate-200 hover:bg-slate-700'
             }`}
             title="配置大模型"
@@ -313,6 +483,11 @@ export default function LLMCompanion({
             <Settings className="w-4 h-4" />
           </button>
         </div>
+      </div>
+
+      {/* Mood Panel — always visible above messages */}
+      <div ref={moodPanelRef} className="px-3 pt-3 pb-1 shrink-0">
+        <MoodPanel mood={moodState} />
       </div>
 
       {/* Model settings panels overlay */}
@@ -381,8 +556,8 @@ export default function LLMCompanion({
               type={showKeySecret ? "text" : "password"}
               className="w-full bg-[#070b13] border border-slate-800 rounded px-3 py-2 text-slate-200 font-mono tracking-wider focus:outline-none focus:border-indigo-600 focus:ring-1 focus:ring-indigo-650"
               placeholder={
-                provider === 'gemini' 
-                  ? "可以留空。默认使用服务器配置的密钥..." 
+                provider === 'gemini'
+                  ? "可以留空。默认使用服务器配置的密钥..."
                   : `输入你的 ${provider} API Key密钥`
               }
               value={apiKey}
@@ -515,14 +690,14 @@ export default function LLMCompanion({
               <div
                 key={msg.id}
                 className={`flex flex-col max-w-[85%] ${
-                  msg.sender === 'user' 
-                    ? 'self-end items-end' 
+                  msg.sender === 'user'
+                    ? 'self-end items-end'
                     : msg.sender === 'system'
                     ? 'self-center w-full text-center'
                     : 'self-start items-start'
                 }`}
               >
-                
+
                 {/* sender name details */}
                 <div className="flex items-center gap-1.5 mb-1 select-none text-[10px] text-slate-500 font-mono">
                   {msg.sender === 'user' ? (
@@ -537,7 +712,14 @@ export default function LLMCompanion({
                   ) : (
                     <>
                       <Bot className="w-3 h-3 text-indigo-500" />
-                      <span className="font-semibold text-indigo-400">Companion Avatar</span>
+                      <span className="font-semibold text-indigo-400">
+                        {msg.isProactive ? `Companion (${getMoodEmoji(getMoodLabel(moodState))})` : 'Companion Avatar'}
+                      </span>
+                      {msg.isProactive && (
+                        <span className="text-[8px] bg-amber-500/10 text-amber-400 border border-amber-500/20 px-1 py-0.5 rounded font-mono">
+                          主动
+                        </span>
+                      )}
                     </>
                   )}
                 </div>
@@ -552,17 +734,37 @@ export default function LLMCompanion({
                         ? msg.error
                           ? 'bg-red-500/10 border border-red-500/30 text-red-300 w-full rounded-lg text-left font-mono'
                           : 'bg-slate-850/30 border border-slate-800 text-slate-400 rounded-lg text-center'
+                        : msg.isProactive
+                        ? 'bg-amber-500/10 border border-amber-500/20 text-slate-100 rounded-tl-none shadow'
                         : 'bg-slate-800/80 border border-slate-700/40 text-slate-100 rounded-tl-none shadow'
                     }`}
                   >
                     <p className="whitespace-pre-wrap">{msg.text}</p>
-                    
+
                     {/* Animation indicator tag at bottom of AI response */}
                     {msg.animation && (
                       <div className="mt-2.5 flex items-center gap-1.5 select-none bg-[#090f19] border border-indigo-500/20 rounded px-2 py-1 text-[10px] font-mono text-indigo-300 self-start">
                         <Film className="w-3 h-3 text-indigo-400" />
                         <span>驱动骨络动画:</span>
                         <strong className="text-indigo-200">{msg.animation}</strong>
+                      </div>
+                    )}
+
+                    {/* Mood delta indicator */}
+                    {msg.moodDelta && Object.keys(msg.moodDelta).length > 0 && (
+                      <div className="mt-1.5 flex items-center gap-1.5 select-none text-[9px] text-slate-500 font-mono">
+                        <Sparkles className="w-2.5 h-2.5 text-emerald-400" />
+                        <span>心情变化: </span>
+                        {Object.entries(msg.moodDelta || {}).map(([key, val]) => {
+                          if (typeof val !== 'number') return null;
+                          const labels: Record<string, string> = { happiness: '快乐', energy: '精力', anger: '愤怒', sadness: '悲伤' };
+                          const sign = val > 0 ? '+' : '';
+                          return (
+                            <span key={key} className={val > 0 ? 'text-emerald-400' : 'text-red-400'}>
+                              {labels[key] || key}: {sign}{Math.round(val)}
+                            </span>
+                          );
+                        })}
                       </div>
                     )}
                   </div>
@@ -573,8 +775,8 @@ export default function LLMCompanion({
                       type="button"
                       onClick={() => playTextSpeech(msg.text, msg.id)}
                       className={`p-1.5 rounded-lg border border-slate-850 bg-slate-900 transition flex items-center justify-center shrink-0 hover:bg-slate-800 hover:text-white cursor-pointer ${
-                        isPlayingAudio === msg.id 
-                          ? 'text-emerald-400 border-emerald-500/30 animate-pulse' 
+                        isPlayingAudio === msg.id
+                          ? 'text-emerald-400 border-emerald-500/30 animate-pulse'
                           : 'text-slate-500'
                       }`}
                       title="重读/播放此回复语音"
@@ -598,6 +800,21 @@ export default function LLMCompanion({
                   <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce" style={{ animationDelay: '0ms' }} />
                   <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce" style={{ animationDelay: '150ms' }} />
                   <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce" style={{ animationDelay: '300ms' }} />
+                </div>
+              </div>
+            )}
+
+            {/* Proactive chat thinking indicator */}
+            {isProactiveThinking && (
+              <div className="self-start flex flex-col items-start max-w-[80%]">
+                <div className="flex items-center gap-1.5 mb-1 text-[10px] text-slate-500 font-mono">
+                  <Sparkles className="w-3 h-3 text-amber-400 animate-pulse" />
+                  <span>角色正在感应心情变化...</span>
+                </div>
+                <div className="bg-amber-500/10 border border-amber-500/20 px-4 py-3 rounded-2xl rounded-tl-none flex items-center gap-2">
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-bounce" style={{ animationDelay: '0ms' }} />
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-bounce" style={{ animationDelay: '150ms' }} />
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-bounce" style={{ animationDelay: '300ms' }} />
                 </div>
               </div>
             )}
@@ -641,8 +858,8 @@ export default function LLMCompanion({
               disabled={isTyping}
               className="flex-1 bg-[#060a12] border border-slate-800 rounded-lg px-3.5 py-2 text-xs text-slate-100 placeholder-slate-600 focus:outline-none focus:border-indigo-600 disabled:opacity-50"
               placeholder={
-                detectedClips.length > 0 
-                  ? "发个消息，让 AI 依据上下文自动匹配动画动作..." 
+                detectedClips.length > 0
+                  ? "发个消息，让 AI 依据上下文自动匹配动画动作..."
                   : "当前模型无动画，AI 仅进行普通文本交互..."
               }
               value={inputMessage}

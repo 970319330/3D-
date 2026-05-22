@@ -1,10 +1,11 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
 import { MTLLoader } from 'three/examples/jsm/loaders/MTLLoader.js';
 import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader.js';
+import { EXRLoader } from 'three/examples/jsm/loaders/EXRLoader.js';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { TGALoader } from 'three/examples/jsm/loaders/TGALoader.js';
 import { JointNode, EditorMode, WeightBrushSettings, KeyframeData } from '../types';
@@ -288,17 +289,18 @@ export default function Viewport({
 
     if (hdrPreset === 'custom' && customHdrFile) {
       const url = URL.createObjectURL(customHdrFile);
-      const loader = new RGBELoader();
-      
+      const isExr = customHdrFile.name.toLowerCase().endsWith('.exr');
+      const loader = isExr ? new EXRLoader() : new RGBELoader();
+
       loader.load(
         url,
-        (hdrTexture) => {
+        (hdrTexture: THREE.Texture) => {
           applyEnvironment(hdrTexture);
           URL.revokeObjectURL(url);
         },
         undefined,
-        (err) => {
-          console.error("加载自定义 HDR 贴图失败: ", err);
+        (err: unknown) => {
+          console.error(`加载自定义 ${isExr ? 'EXR' : 'HDR'} 贴图失败: `, err);
           setIsHdrLoading(false);
           URL.revokeObjectURL(url);
           // Auto revert to studio if custom fails
@@ -433,6 +435,30 @@ export default function Viewport({
     }
   }, [isShowroomActive, activeModelType, joints]);
 
+  // Directly play a clip on the mixer, bypassing React state for immediate transition.
+  // Used by the 'finished' event handler to avoid the 1-2 frame delay of setState + re-render.
+  const playClipDirect = useCallback((clipName: string, mixer: THREE.AnimationMixer, clips: THREE.AnimationClip[], standbyName: string) => {
+    const clip = clips.find(c => c.name === clipName);
+    if (!clip) return;
+
+    mixer.stopAllAction();
+    const action = mixer.clipAction(clip);
+    action.stop();      // ensure fully stopped so reset() works from a clean state
+    action.reset();     // time=0, weight=1, enabled=true
+    action.time = 0;    // explicit guard: force time to 0
+    action.setEffectiveWeight(1);
+    action.setEffectiveTimeScale(isGltfAnimating ? showroomSpeed : 0);
+
+    if (clipName !== standbyName) {
+      action.setLoop(THREE.LoopOnce, 1);
+      action.clampWhenFinished = true;
+    } else {
+      action.setLoop(THREE.LoopRepeat, Infinity);
+      action.clampWhenFinished = false;
+    }
+    action.play();
+  }, [isGltfAnimating, showroomSpeed]);
+
   // Synchronize animation clip playing transitions inside GLTF Animation Mixer
   useEffect(() => {
     const t = threeRef.current;
@@ -444,29 +470,16 @@ export default function Viewport({
     }
 
     const standbyClipName = findStandbyClipName(t.gltfClips);
-    const clip = t.gltfClips.find(c => c.name === activeClipName);
-    if (clip) {
-      t.gltfMixer.stopAllAction();
-      const action = t.gltfMixer.clipAction(clip);
-      action.reset().fadeIn(0.2);
-      action.setEffectiveTimeScale(isGltfAnimating ? showroomSpeed : 0);
-      
-      if (activeClipName !== standbyClipName) {
-        action.setLoop(THREE.LoopOnce, 1);
-        action.clampWhenFinished = true;
-      } else {
-        action.setLoop(THREE.LoopRepeat, Infinity);
-        action.clampWhenFinished = false;
-      }
-      
-      action.play();
-    }
+    playClipDirect(activeClipName, t.gltfMixer, t.gltfClips, standbyClipName);
 
     // Set up finished event listener to restore to standby animation
     const onFinished = (e: any) => {
       const standbyName = findStandbyClipName(t.gltfClips || []);
       if (standbyName && activeClipName !== standbyName) {
-        // Switch back to standby animation
+        // Directly play standby animation on the mixer WITHOUT going through React state
+        // This avoids the delay between setState -> re-render -> effect running.
+        playClipDirect(standbyName, t.gltfMixer!, t.gltfClips!, standbyName);
+        // Also update the React state for UI consistency (e.g. clip name display)
         setActiveClipName(standbyName);
       }
     };
@@ -475,7 +488,7 @@ export default function Viewport({
     return () => {
       t.gltfMixer?.removeEventListener('finished', onFinished);
     };
-  }, [activeClipName, isShowroomActive, isGltfAnimating, showroomSpeed]);
+  }, [activeClipName, isShowroomActive, isGltfAnimating, showroomSpeed, playClipDirect]);
 
   // Notify parent of loaded clips list
   useEffect(() => {
@@ -3047,11 +3060,11 @@ export default function Viewport({
                   <label className="flex items-center gap-1.5 justify-center py-1 rounded bg-slate-800 hover:bg-slate-700/85 text-slate-200 text-[10px] font-bold cursor-pointer transition select-none">
                     <UploadCloud className="w-3.5 h-3.5 text-indigo-400" />
                     <span className="truncate max-w-[180px]">
-                      {customHdrFile ? customHdrFile.name : '上传本地 .hdr 贴图'}
+                      {customHdrFile ? customHdrFile.name : '上传本地 .hdr/.exr 贴图'}
                     </span>
                     <input
                       type="file"
-                      accept=".hdr"
+                      accept=".hdr,.exr"
                       className="hidden"
                       onChange={(e) => {
                         if (e.target.files && e.target.files[0]) {
@@ -3062,7 +3075,7 @@ export default function Viewport({
                     />
                   </label>
                   <p className="text-[9px] text-slate-500 leading-normal text-center">
-                    支持标准高动态范围 <code>.hdr</code> 光照图，为模型材质映射真实折射反射。
+                    支持标准高动态范围 <code>.hdr</code> / <code>.exr</code> 光照图，为模型材质映射真实折射反射。
                   </p>
                 </div>
               )}
@@ -3080,7 +3093,9 @@ export default function Viewport({
                 </label>
               )}
             </div>
-          )}
+          </div>
+          </div>
+        )}
         </div>
       )}
 

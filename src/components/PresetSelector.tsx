@@ -12,6 +12,7 @@ interface PresetSelectorProps {
   onCustomMtlLoaded: (file: File | null) => void;
   customTextureFiles: File[];
   onCustomTextureFilesLoaded: (files: File[]) => void;
+  onUnloadModel: () => void;
 }
 
 export default function PresetSelector({
@@ -24,7 +25,8 @@ export default function PresetSelector({
   customMtlFile,
   onCustomMtlLoaded,
   customTextureFiles,
-  onCustomTextureFilesLoaded
+  onCustomTextureFilesLoaded,
+  onUnloadModel
 }: PresetSelectorProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textureInputRef = useRef<HTMLInputElement>(null);
@@ -164,7 +166,7 @@ export default function PresetSelector({
               <button
                 onClick={(e) => {
                   e.stopPropagation();
-                  onSelectPreset('cylinder');
+                  onUnloadModel();
                 }}
                 className="text-[10px] bg-slate-800 hover:bg-slate-705 px-2 py-1 rounded text-red-400 hover:text-red-300 transition"
               >

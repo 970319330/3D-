@@ -35,3 +35,26 @@ export interface ModelPreset {
   type: 'cylinder' | 'capsule' | 'humanoid' | 'box' | 'gltf';
   label: string;
 }
+
+// --- 心情系统类型 ---
+
+export type MoodKey = 'happiness' | 'energy' | 'anger' | 'sadness';
+
+export type MoodState = Record<MoodKey, number>;
+
+export type MoodDelta = Partial<Record<MoodKey, number>>;
+
+export interface ThresholdEvent {
+  dimension: MoodKey;
+  label: string;
+  min: number;
+  max: number;
+  cooldownMs: number;
+  lastTriggeredAt: number;
+}
+
+export interface ProactiveChatEvent {
+  dimension: MoodKey;
+  label: string;
+  value: number;
+}

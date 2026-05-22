@@ -158,51 +158,6 @@ ${JSON.stringify(animations)}
     }
   });
 
-  // API Route for voice synthesis using Aliyun DashScope (qwen3-tts-flash)
-  app.post("/api/llm/tts", async (req, res) => {
-    try {
-      const { text, voice = 'Cherry', apiKey = '' } = req.body;
-      if (!text) {
-        return res.status(400).json({ error: "音频转换文本为空" });
-      }
-
-      const finalKey = apiKey || process.env.DASHSCOPE_API_KEY || "";
-      if (!finalKey) {
-        return res.status(400).json({ error: "未设置 DASHSCOPE_API_KEY密钥。请在大模型设置面板中配置，或在 Secrets 设置中传入。" });
-      }
-
-      const response = await fetch('https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${finalKey}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          model: 'qwen3-tts-flash',
-          input: {
-            text,
-            voice,
-            language_type: 'Chinese'
-          }
-        })
-      });
-
-      if (!response.ok) {
-        const errText = await response.text();
-        throw new Error(`阿里云语音服务调用失败 (${response.status}): ${errText}`);
-      }
-
-      const arrayBuffer = await response.arrayBuffer();
-      const buffer = Buffer.from(arrayBuffer);
-
-      res.setHeader('Content-Type', response.headers.get('content-type') || 'audio/mpeg');
-      res.send(buffer);
-    } catch (error: any) {
-      console.error("TTS Proxy Error:", error);
-      res.status(500).json({ error: error.message || "语音合成网关异常" });
-    }
-  });
-
   // Serve static UI assets inside Vite Dev Server / production build folder
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({

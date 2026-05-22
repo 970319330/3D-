@@ -3,9 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
-import { EditorMode, JointNode, WeightBrushSettings, KeyframeData } from './types';
+import React, { useState, useEffect, useRef } from 'react';
+import { EditorMode, JointNode, WeightBrushSettings, KeyframeData, MoodState, MoodDelta } from './types';
 import { getPresetSkeletons } from './utils/rigging';
+import { MoodEngine } from './utils/moodEngine';
 import Viewport from './components/Viewport';
 import PresetSelector from './components/PresetSelector';
 import SkeletonTree from './components/SkeletonTree';
@@ -47,6 +48,31 @@ export default function App() {
 
   // Auto-rig execution counter
   const [autoRigTrigger, setAutoRigTrigger] = useState<number>(0);
+
+  // Mood system state
+  const moodEngineRef = useRef<MoodEngine>(new MoodEngine());
+  const [moodState, setMoodState] = useState<MoodState>(moodEngineRef.current.getState());
+  const [moodEventTrigger, setMoodEventTrigger] = useState<number>(0); // increment on each threshold event
+
+  // Mood tick timer — runs every 1 second
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const engine = moodEngineRef.current;
+      const events = engine.tick(1000);
+      setMoodState(engine.getState());
+
+      // Signal LLMCompanion to immediately check for proactive chat
+      if (events.length > 0) {
+        setMoodEventTrigger((prev: number) => prev + 1);
+      }
+    }, 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const handleMoodDelta = (delta: import('./types').MoodDelta) => {
+    moodEngineRef.current.applyDelta(delta);
+    setMoodState(moodEngineRef.current.getState());
+  };
 
   // Clean skin index & skin weight buffers updated by WebGL Viewport
   const [skinBuffers, setSkinBuffers] = useState<{ indices: Float32Array; weights: Float32Array } | null>(null);
@@ -98,6 +124,23 @@ export default function App() {
     setAutoRigTrigger(prev => prev + 1);
   };
 
+  // Unload model: clear everything and show empty scene
+  const handleUnloadModel = () => {
+    setActiveModelType('gltf');
+    setCustomFile(null);
+    setCustomTextureFile(null);
+    setCustomMtlFile(null);
+    setCustomTextureFiles([]);
+    setSelectedJointId(null);
+    setIsPaintingActive(false);
+    setKeyframes([]);
+    setHasSkinWeight(false);
+    setSkinBuffers(null);
+    setJoints([
+      { id: 'root', name: 'Root Hub', parentId: null, position: [0, 0, 0], rotation: [0, 0, 0] }
+    ]);
+  };
+
   // Turn painting active/inactive
   const handleTogglePainting = (active: boolean) => {
     setIsPaintingActive(active);
@@ -112,7 +155,7 @@ export default function App() {
             <Layers3 className="w-5 h-5 text-indigo-50" />
           </div>
           <div className="flex flex-col">
-            <h1 className="text-sm font-bold tracking-wide text-slate-200 uppercase">3D模型骨骼动画编辑器</h1>
+            <h1 className="text-sm font-bold tracking-wide text-slate-200 uppercase">AUTGO3D</h1>
             <p className="text-[10px] text-slate-500 font-mono">Interactive Web 3D Joint, Rigging & Animation Studio</p>
           </div>
         </div>
@@ -226,6 +269,9 @@ export default function App() {
               <LLMCompanion
                 detectedClips={detectedClips}
                 onTriggerAnimation={setExternalActiveClipName}
+                moodState={moodState}
+                onMoodDelta={handleMoodDelta}
+                moodEventTrigger={moodEventTrigger}
               />
             </div>
           ) : (
@@ -244,6 +290,7 @@ export default function App() {
                   onCustomMtlLoaded={setCustomMtlFile}
                   customTextureFiles={customTextureFiles}
                   onCustomTextureFilesLoaded={setCustomTextureFiles}
+                  onUnloadModel={handleUnloadModel}
                 />
               )}
 
@@ -317,10 +364,10 @@ export default function App() {
         </aside>
 
         {/* Right Side: Viewport rendering segment + animation timeline bar */}
-        <main className="flex-1 flex flex-col bg-[#070b13] relative overflow-hidden">
-          
-          {/* Main Visual interactive area */}
-          <div className="flex-1 relative border-b border-slate-800/40">
+        <main className="flex-1 relative bg-[#070b13] overflow-hidden">
+
+          {/* Main Visual interactive area — fills entire main */}
+          <div className="absolute inset-0 border-b border-slate-800/40">
             <Viewport
               joints={joints}
               selectedJointId={selectedJointId}
@@ -344,17 +391,21 @@ export default function App() {
             />
           </div>
 
-          {/* Fixed bottom timeline suite */}
-          <Timeline
-            currentFrame={currentFrame}
-            keyframes={keyframes}
-            isPlaying={isPlaying}
-            onFrameChange={setCurrentFrame}
-            onPlayToggle={setIsPlaying}
-            onKeyframesUpdate={setKeyframes}
-            joints={joints}
-            onJointsUpdate={setJoints}
-          />
+          {/* Timeline overlaid at bottom — only in animate mode */}
+          {editorMode === 'animate' && (
+            <div className="absolute bottom-0 left-0 right-0 z-10">
+              <Timeline
+                currentFrame={currentFrame}
+                keyframes={keyframes}
+                isPlaying={isPlaying}
+                onFrameChange={setCurrentFrame}
+                onPlayToggle={setIsPlaying}
+                onKeyframesUpdate={setKeyframes}
+                joints={joints}
+                onJointsUpdate={setJoints}
+              />
+            </div>
+          )}
         </main>
       </div>
 
