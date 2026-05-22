@@ -96,13 +96,18 @@ function isBoneAllowedForVertex(
     if (py > maxReachY) return false;
   }
   
-  // 4. Arm bones (shoulder, elbow, hand, wrist, arm) shouldn't bleed into pelvis or lower legs
+  // 4. Arm bones (shoulder, elbow, hand, wrist, arm) shouldn't bleed into pelvis or lower legs, and absolutely must NOT influence head/face vertices!
   const isArm = nameL.includes('shoulder') || nameL.includes('elbow') || nameL.includes('wrist') || nameL.includes('arm') || nameL.includes('hand');
   if (isArm) {
     // Shoulders/elbows shouldn't reach chest core unless outside shoulder limit, or reach legs
     const coreRange = shoulderSpan * 0.22;
     if (Math.abs(px - centerX) < coreRange && py < neckY) return false; 
     if (py < pelvisY - torsoHeight * 0.1) return false; // Legs/thighs are off limits
+    
+    // Arm bones must NEVER influence any head/face vertices (above neck scale)
+    if (py >= neckY - torsoHeight * 0.02) {
+      return false; // Blocks head bleed completely
+    }
   }
   
   // 5. Elbow / Wrist / Hand should be even more localized (outer arm)
@@ -110,6 +115,11 @@ function isBoneAllowedForVertex(
   if (isLowerArm) {
     const armRange = shoulderSpan * 0.42;
     if (Math.abs(px - centerX) < armRange) return false; 
+    
+    // Lower arms should never influence vertices near the neck or head
+    if (py >= neckY - torsoHeight * 0.08) {
+      return false;
+    }
   }
   
   // 6. Leg bones (hip, knee, foot, leg) shouldn't reach shoulder or chest

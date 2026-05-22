@@ -13,6 +13,7 @@ import SkeletonTree from './components/SkeletonTree';
 import WeightPainterPanel from './components/WeightPainterPanel';
 import Timeline from './components/Timeline';
 import LLMCompanion from './components/LLMCompanion';
+import QuickPoser from './components/QuickPoser';
 import { Box, Workflow, Paintbrush, Play, Layers3, Flame, HelpCircle, Bot } from 'lucide-react';
 
 export default function App() {
@@ -347,6 +348,15 @@ export default function App() {
                       系统会自动对关键帧之间的骨骼偏转系数进行 <strong>四元数插值插补 (SLERP)</strong> 运算，使整个关节在连续循环律动时极其自然且不卡顿。
                     </p>
                   </div>
+
+                  <hr className="border-slate-800/80 my-1" />
+
+                  <QuickPoser
+                    joints={joints}
+                    onUpdateJoints={setJoints}
+                    selectedJointId={selectedJointId}
+                    onSelectJoint={setSelectedJointId}
+                  />
 
                   <hr className="border-slate-800/80 my-1" />
 

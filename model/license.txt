@@ -1,0 +1,11 @@
+Model Information:
+* title:	苏帕Free
+* source:	https://sketchfab.com/3d-models/free-8072f731117541f59fc2d803816f5775
+* author:	可莉莎 (https://sketchfab.com/toppkoo)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "苏帕Free" (https://sketchfab.com/3d-models/free-8072f731117541f59fc2d803816f5775) by 可莉莎 (https://sketchfab.com/toppkoo) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)

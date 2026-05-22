@@ -1259,6 +1259,30 @@ export default function Viewport({
         (m as any).opacity = 1.0;
         (m as any).transparent = false;
       }
+
+      // Fix OBJ/MTL black texture issue:
+      // When diffuse color (Kd) is zero/black, Three.js multiplies it with the texture map,
+      // resulting in a pure black rendering. We force the color to white if a texture map (map) is present
+      // and the color is black or extremely dark.
+      if ('color' in m && (m as any).color) {
+        const c = (m as any).color as THREE.Color;
+        const hasMap = !!(m as any).map;
+        if (hasMap) {
+          if (c.r < 0.15 && c.g < 0.15 && c.b < 0.15) {
+            console.log(`[Material Auto-Fix] Diffuse color is too dark (${c.r.toFixed(2)}, ${c.g.toFixed(2)}, ${c.b.toFixed(2)}) for textured material "${m.name || ''}". Overriding to white to restore texture visibility.`);
+            c.setRGB(1, 1, 1);
+          }
+        }
+      }
+
+      // Ensure that all loaded textures use sRGB color space to avoid dark/washed-out renderings
+      if ((m as any).map) {
+        const tex = (m as any).map;
+        tex.colorSpace = THREE.SRGBColorSpace;
+        if (tex.image && (tex.image.complete !== false || tex.image.width > 0)) {
+          tex.needsUpdate = true;
+        }
+      }
     });
 
     // Save materialsArray on ref if we found any
@@ -1472,28 +1496,115 @@ export default function Viewport({
       if (customModelFile) {
       const extension = customModelFile.name.split('.').pop()?.toLowerCase();
       
+      const convertMaterialToPBR = (m: THREE.Material): THREE.Material => {
+        if (!m) return m;
+        if (m instanceof THREE.MeshStandardMaterial || m instanceof THREE.MeshPhysicalMaterial) {
+          const mAny = m as any;
+          if (mAny.map && mAny.color && (mAny.color.r < 0.12 && mAny.color.g < 0.12 && mAny.color.b < 0.12)) {
+            mAny.color.setRGB(1, 1, 1);
+          }
+          return m;
+        }
+        
+        const old = m as any;
+        const color = old.color ? old.color.clone() : new THREE.Color(0xffffff);
+        if (old.map && (color.r < 0.12 && color.g < 0.12 && color.b < 0.12)) {
+          color.setRGB(1, 1, 1);
+        }
+
+        const standard = new THREE.MeshStandardMaterial({
+          name: old.name,
+          color: color,
+          map: old.map || null,
+          normalMap: old.normalMap || null,
+          normalScale: old.normalScale ? old.normalScale.clone() : new THREE.Vector2(1, 1),
+          roughness: old.roughness !== undefined ? old.roughness : 0.5,
+          metalness: old.metalness !== undefined ? old.metalness : 0.1,
+          alphaMap: old.alphaMap || null,
+          aoMap: old.aoMap || null,
+          bumpMap: old.bumpMap || null,
+          bumpScale: old.bumpScale !== undefined ? old.bumpScale : 1.0,
+          emissive: old.emissive ? old.emissive.clone() : new THREE.Color(0x000000),
+          emissiveMap: old.emissiveMap || null,
+          emissiveIntensity: old.emissiveIntensity !== undefined ? old.emissiveIntensity : 1.0,
+          opacity: old.opacity !== undefined ? old.opacity : 1.0,
+          transparent: old.transparent || false,
+          alphaTest: old.alphaTest || 0,
+          vertexColors: old.vertexColors !== undefined ? old.vertexColors : false,
+          side: old.side !== undefined ? old.side : THREE.DoubleSide,
+          depthWrite: old.depthWrite !== undefined ? old.depthWrite : true,
+          depthTest: old.depthTest !== undefined ? old.depthTest : true,
+        });
+
+        if (old.shininess !== undefined) {
+          const convertedRoughness = Math.max(0.05, Math.min(0.95, 1.0 - Math.min(100, old.shininess) / 100.0));
+          standard.roughness = convertedRoughness;
+        } else if (old.specular && old.specular instanceof THREE.Color) {
+          const specLuminance = (old.specular.r + old.specular.g + old.specular.b) / 3;
+          standard.roughness = Math.max(0.1, Math.min(0.9, 1.0 - specLuminance));
+        }
+        
+        if (typeof old.dispose === 'function') {
+          old.dispose();
+        }
+        
+        return standard;
+      };
+
       const manager = new THREE.LoadingManager();
       manager.addHandler(/\.tga$/i, new TGALoader(manager));
       const fileUrls: Record<string, string> = {};
+      const allUploadedFiles: { file: File; url: string; cleanName: string; webkitPath: string; segments: string[] }[] = [];
+      const uploadedTextures: { file: File; url: string; cleanName: string; webkitPath: string; segments: string[] }[] = [];
 
-      fileUrls[customModelFile.name.toLowerCase()] = createLocalUrl(customModelFile);
+      const registerFile = (f: File, isTexture = false) => {
+        const url = createLocalUrl(f);
+        fileUrls[f.name.toLowerCase()] = url;
+        
+        const webkitPath = (f.webkitRelativePath || '').replace(/\\/g, '/').toLowerCase();
+        const cleanName = f.name.toLowerCase();
+        const segments = webkitPath ? webkitPath.split('/') : [cleanName];
+
+        const record = {
+          file: f,
+          url,
+          cleanName,
+          webkitPath,
+          segments
+        };
+        allUploadedFiles.push(record);
+        if (isTexture) {
+          uploadedTextures.push(record);
+        }
+      };
+
+      registerFile(customModelFile);
       
       if (customMtlFile) {
-        fileUrls[customMtlFile.name.toLowerCase()] = createLocalUrl(customMtlFile);
+        registerFile(customMtlFile);
       }
       if (customTextureFiles) {
         customTextureFiles.forEach((f) => {
-          fileUrls[f.name.toLowerCase()] = createLocalUrl(f);
+          registerFile(f, true);
         });
       }
       if (customTextureFile) {
-        fileUrls[customTextureFile.name.toLowerCase()] = createLocalUrl(customTextureFile);
+        registerFile(customTextureFile, true);
       }
 
       manager.setURLModifier((url) => {
-        // If it's already a blob URL or data URL/base64, return it directly to avoid corrupting it
-        if (url.startsWith('data:') || url.startsWith('blob:')) {
+        if (!url || url.startsWith('data:')) {
           return url;
+        }
+
+        // If it's a blob url, only return early if it's one of our registered/uploaded files.
+        // If it's an unresolved relative-resolved blob URL (e.g. blob:https://domain/Image0.png),
+        // let it pass through to extract the filename and run our matching heuristics.
+        if (url.startsWith('blob:')) {
+          const isRegistered = allUploadedFiles.some((record) => record.url === url);
+          if (isRegistered) {
+            return url;
+          }
         }
 
         // Decode the URL in case it includes percent-encoded characters like %20 for spaces
@@ -1501,20 +1612,112 @@ export default function Viewport({
         try {
           decodedUrl = decodeURIComponent(url);
         } catch (e) {
-          console.warn("解码 GLTF/OBJ 资源链接失败: ", e);
+          console.warn("解码 3D 资源链接失败: ", e);
         }
         
         // Remove trailing or preceding reference paths and standardize Windows backslashes
-        const cleanUrl = decodedUrl.replace(/^(\.\/|\.\.\/)+/, '').replace(/\\/g, '/');
-        const fileName = cleanUrl.split('/').pop()?.toLowerCase() || '';
+        const cleanUrl = decodedUrl.replace(/^(\.\/|\.\.\/)+/, '').replace(/\\/g, '/').toLowerCase();
         
-        if (fileUrls[fileName]) {
-          return fileUrls[fileName];
+        // Split the requested URL into segments
+        const requestedSegments = cleanUrl.split('/');
+        const fileName = requestedSegments[requestedSegments.length - 1] || '';
+        
+        const lastDotIdx = fileName.lastIndexOf('.');
+        const fileBase = lastDotIdx !== -1 ? fileName.substring(0, lastDotIdx) : fileName;
+
+        let bestMatch: typeof allUploadedFiles[0] | null = null;
+        let maxScore = -1;
+
+        allUploadedFiles.forEach((record) => {
+          let score = 0;
+          
+          // Check for exact file name match (including extension)
+          if (record.cleanName === fileName) {
+            score += 300;
+          } else {
+            // Check for extension-independent base name match (e.g., skin.tga vs skin.png)
+            const recLastDotIdx = record.cleanName.lastIndexOf('.');
+            const recBase = recLastDotIdx !== -1 ? record.cleanName.substring(0, recLastDotIdx) : record.cleanName;
+            
+            if (recBase && fileBase && recBase === fileBase) {
+              score += 150; // High score but lower than exact extension match
+            } else if (fileBase && recBase && (fileBase.endsWith(recBase) || recBase.endsWith(fileBase))) {
+              score += 80;
+            }
+          }
+
+          // If there is any file name or base name similarity, apply path reference rules boosting
+          if (score > 0) {
+            // Perfect path suffix matching (e.g. webkitPath: "a/b/textures/face.png", cleanUrl: "textures/face.png")
+            if (record.webkitPath && cleanUrl && (record.webkitPath.endsWith(cleanUrl) || cleanUrl.endsWith(record.webkitPath))) {
+              score += 500;
+            }
+
+            // Folder hierarchy depth matching
+            if (record.segments.length > 0 && requestedSegments.length > 0) {
+              const fileSegs = record.segments;
+              const reqSegs = requestedSegments;
+              
+              const minLen = Math.min(fileSegs.length, reqSegs.length);
+              let folderBoost = 0;
+              
+              // Move backwards from the file extension / file name (index -1 is file name, index -2 is direct parent directory, etc.)
+              for (let i = 1; i < minLen; i++) {
+                const fileDir = fileSegs[fileSegs.length - 1 - i];
+                const reqDir = reqSegs[reqSegs.length - 1 - i];
+                
+                if (fileDir && reqDir && fileDir === reqDir) {
+                  folderBoost += 100; // Add 100 points for each matching parent directory segment
+                } else {
+                  break; // Stop matching folder hierarchy once a mismatch is found
+                }
+              }
+              score += folderBoost;
+            }
+          }
+
+          if (score > maxScore) {
+            maxScore = score;
+            bestMatch = record;
+          }
+        });
+
+        if (bestMatch && maxScore > 0) {
+          console.log(`[路径引用规则匹配成功] 原请求资源: "${url}" (解析为: "${cleanUrl}"), 智能匹配映射为: "${bestMatch.file.name}" | 路径: "${bestMatch.webkitPath || '无'}" | 匹配分值: ${maxScore}`);
+          return bestMatch.url;
         }
         
-        const matchingKey = Object.keys(fileUrls).find((k) => fileName.endsWith(k) || k.endsWith(fileName));
-        if (matchingKey) {
-          return fileUrls[matchingKey];
+        // --- TEXTURE HEURISTIC FALLBACKS (PREVENTS Failed to load resource ERR_FILE_NOT_FOUND) ---
+        const isImage = /\.(png|jpg|jpeg|tga|bmp|gif|dds|exr|hdr|tiff?)$/i.test(fileName);
+        if (isImage) {
+          if (uploadedTextures.length > 0) {
+            // A: Only 1 custom texture uploaded -> Map everything here
+            if (uploadedTextures.length === 1) {
+              console.log(`[路径引用规则-单贴图降级匹配] 未找到相似度匹配，但由于仅有一个本地贴图，将资源请求 "${url}" 自动映射为: "${uploadedTextures[0].file.name}"`);
+              return uploadedTextures[0].url;
+            }
+
+            // B: Indices matching rule (e.g. Image0.png -> sortedTextures[0])
+            const numMatch = fileName.match(/\d+/);
+            if (numMatch) {
+              const index = parseInt(numMatch[0], 10);
+              const sortedTextures = [...uploadedTextures].sort((a, b) => a.cleanName.localeCompare(b.cleanName));
+              if (index >= 0 && index < sortedTextures.length) {
+                const matched = sortedTextures[index];
+                console.log(`[路径引用规则-索引降级匹配] 未找到相似度匹配，根据数字索引 (${index}) 映射资源 "${url}" 为: "${matched.file.name}"`);
+                return matched.url;
+              }
+            }
+
+            // C: Sort alphabetically and take the first uploaded texture as fallback
+            const sortedTextures = [...uploadedTextures].sort((a, b) => a.cleanName.localeCompare(b.cleanName));
+            console.log(`[路径引用规则-首贴图降级匹配] 未找到相似度匹配，默认降级映射资源 "${url}" 至第一个本地贴图: "${sortedTextures[0].file.name}"`);
+            return sortedTextures[0].url;
+          } else {
+            // D: No texture files uploaded at all -> return 1x1 transparent Base64 image data URL
+            console.log(`[路径引用规则-防404防报错占位] 外部贴图请求未匹配到且未上传任何贴图: "${url}"。返回1x1透明图避免控制台 404/ERR_FILE_NOT_FOUND 报错`);
+            return 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+          }
         }
         
         return url;
@@ -1581,6 +1784,23 @@ export default function Viewport({
           fbxUrl,
           (fbxGroup) => {
             try {
+              // Convert materials to THREE.MeshStandardMaterial to support loaded standard/PBR textures & features properly
+              fbxGroup.traverse((child) => {
+                if (child instanceof THREE.Mesh || (child as any).isMesh) {
+                  const meshChild = child as THREE.Mesh;
+                  if (!meshChild.material) {
+                    meshChild.material = new THREE.MeshStandardMaterial({
+                      color: new THREE.Color(0xffffff),
+                      side: THREE.DoubleSide
+                    });
+                  } else if (Array.isArray(meshChild.material)) {
+                    meshChild.material = meshChild.material.map(m => convertMaterialToPBR(m));
+                  } else {
+                    meshChild.material = convertMaterialToPBR(meshChild.material);
+                  }
+                }
+              });
+
               let foundTexture: THREE.Texture | null = null;
               fbxGroup.traverse((child) => {
                 if (child instanceof THREE.Mesh || (child as any).isMesh) {
@@ -1777,6 +1997,13 @@ export default function Viewport({
                             
                             if (slot === 'map') {
                               newTexture.colorSpace = THREE.SRGBColorSpace;
+                              
+                              // If diffuse color is black or very dark, force to white so the assigned textures are visible
+                              if (m.color && (m.color.r < 0.15 && m.color.g < 0.15 && m.color.b < 0.15)) {
+                                console.log(`[FBX multi-texture auto-fix] Resetting dark diffuse color (${m.color.r.toFixed(2)}, ${m.color.g.toFixed(2)}, ${m.color.b.toFixed(2)}) for textured material "${m.name || ''}"`);
+                                m.color.setRGB(1, 1, 1);
+                              }
+
                               // Also populate the global loadedTexture so standard fallback shader can see it
                               if (!t.loadedTexture) {
                                 t.loadedTexture = newTexture;
@@ -1831,7 +2058,7 @@ export default function Viewport({
               fbxGroup.position.y = isNaN(groundTransY) ? 0 : groundTransY;
               fbxGroup.position.z = -scaledCenterOfMass.z;
 
-              // Ensure fully visible double sided materials and shadow parameters
+               // Ensure fully visible double sided materials and shadow parameters
               fbxGroup.traverse((child) => {
                 if (child instanceof THREE.Mesh || (child as any).isMesh) {
                   const mesh = child as THREE.Mesh;
@@ -1839,21 +2066,24 @@ export default function Viewport({
                   mesh.receiveShadow = true;
                   const m = mesh.material;
                   if (m) {
-                    if (Array.isArray(m)) {
-                      m.forEach(mat => {
-                        mat.side = THREE.DoubleSide;
-                        if (mat.opacity < 0.15) {
-                          mat.opacity = 1.0;
-                          mat.transparent = false;
-                        }
-                      });
-                    } else {
-                      m.side = THREE.DoubleSide;
-                      if (m.opacity < 0.15) {
-                        m.opacity = 1.0;
-                        m.transparent = false;
+                    const mats = Array.isArray(m) ? m : [m];
+                    mats.forEach(mat => {
+                      mat.side = THREE.DoubleSide;
+                      if (mat.opacity < 0.15) {
+                        mat.opacity = 1.0;
+                        mat.transparent = false;
                       }
-                    }
+                      
+                      // --- PBR TEXTURE EXPOSURE AUTO-FIX ---
+                      // If the material has a diffuse texture (map) but has a pitch black or extremely dark body color,
+                      // standard PBR will multiply the dark color with the texture, causing the texture to render as black.
+                      // We must reset the diffuse multiplier back to pure white to reveal the texture maps.
+                      const mAny = mat as any;
+                      if (mAny.map && mAny.color && (mAny.color.r < 0.12 && mAny.color.g < 0.12 && mAny.color.b < 0.12)) {
+                        console.log(`[FBX Loader Auto-Fix] Detected pitch black ambient/diffuse on textured material "${mAny.name || ''}". Resetting base color to white.`);
+                        mAny.color.setRGB(1, 1, 1);
+                      }
+                    });
                   }
                 }
               });
