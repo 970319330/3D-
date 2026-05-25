@@ -1,6 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 import { KeyframeData, JointNode } from '../types';
-import { Play, Pause, Square, Plus, Trash2, Zap, Sparkles, Rewind, Move } from 'lucide-react';
+import { Play, Pause, Square, Plus, Trash2, Move } from 'lucide-react';
 import { generateIKWalkCycle } from '../utils/ik';
 
 interface TimelineProps {
@@ -103,243 +103,21 @@ export default function Timeline({
     onJointsUpdate(cleared);
   };
 
-  // Preset generative animation patterns based on formulas:
-  const applyPresetAnimation = (style: 'wave' | 'dance' | 'walk' | 'bend' | 'ik-walk') => {
+  // Preset animation: Smart IK-driven arm swing gait
+  const applyPresetAnimation = () => {
     onPlayToggle(false);
     
-    // Generate keyframes at clean split frames (0, 15, 30, 45, 59)
+    // Generate smart IK walk cycle with enhanced arm swing
     const frameSplits = [0, 15, 30, 45, 59];
     const newKeyframes: KeyframeData[] = [];
-
-    if (style === 'ik-walk') {
-      const generated = generateIKWalkCycle(joints);
-      generated.forEach((rotations, index) => {
-        newKeyframes.push({
-          frame: frameSplits[index],
-          rotations: rotations
-        });
+    
+    const generated = generateIKWalkCycle(joints);
+    generated.forEach((rotations, index) => {
+      newKeyframes.push({
+        frame: frameSplits[index],
+        rotations: rotations
       });
-      onKeyframesUpdate(newKeyframes);
-      onFrameChange(0);
-      setTimeout(() => {
-        onPlayToggle(true);
-      }, 150);
-      return;
-    }
-
-    frameSplits.forEach((f) => {
-      const rotationsMap: Record<string, [number, number, number]> = {};
-      const radiansPhase = (f / maxFrames) * Math.PI * 2;
-
-      joints.forEach((joint) => {
-        let rx = 0;
-        let ry = 0;
-        let rz = 0;
-
-        const nameLower = joint.name.toLowerCase();
-        const idLower = joint.id.toLowerCase();
-        
-        // Comprehensive mapping covering humanoid skeletons: Mixamo, Rigify, Custom, Chinese translations, etc.
-        const isLeft = nameLower.includes('l_') || nameLower.includes('left') || idLower.includes('l_') || idLower.includes('left');
-        const isRight = nameLower.includes('r_') || nameLower.includes('right') || idLower.includes('r_') || idLower.includes('right');
-        
-        const isPelvis = nameLower.includes('root') || nameLower.includes('pelvis') || nameLower.includes('hips') || idLower.includes('root') || idLower.includes('pelvis') || idLower.includes('hips');
-        const isSpine = nameLower.includes('spine') || nameLower.includes('chest') || nameLower.includes('torso') || idLower.includes('spine') || idLower.includes('chest') || idLower.includes('torso');
-        const isNeckHead = nameLower.includes('neck') || nameLower.includes('head') || idLower.includes('neck') || idLower.includes('head');
-        
-        const isForearmElbow = nameLower.includes('elbow') || nameLower.includes('forearm') || idLower.includes('elbow') || idLower.includes('forearm');
-        const isShoulderArm = (nameLower.includes('shoulder') || nameLower.includes('arm') || idLower.includes('shoulder') || idLower.includes('arm')) && !isForearmElbow && !nameLower.includes('leg');
-        
-        const isThighHip = nameLower.includes('hip') || nameLower.includes('upleg') || nameLower.includes('thigh') || nameLower.includes('upperleg') || idLower.includes('hip') || idLower.includes('upleg') || idLower.includes('thigh') || idLower.includes('upperleg');
-        const isKneeCalf = (nameLower.includes('knee') || nameLower.includes('leg') || nameLower.includes('calf') || nameLower.includes('shin') || idLower.includes('knee') || idLower.includes('leg') || idLower.includes('calf') || idLower.includes('shin')) && !isThighHip && !nameLower.includes('foot') && !nameLower.includes('ankle') && !nameLower.includes('toe');
-        const isFoot = nameLower.includes('foot') || nameLower.includes('ankle') || nameLower.includes('toe') || idLower.includes('foot') || idLower.includes('ankle') || idLower.includes('toe');
-
-        if (style === 'wave') {
-          // Unilateral highly natural right-hand waving motion with organic posture balancing and head nodding
-          if (isShoulderArm) {
-            if (isRight) {
-              // Right arm raised high outwards and slightly forward
-              rz = 1.35; 
-              rx = -0.22 + Math.sin(radiansPhase * 2.0) * 0.05;
-            } else {
-              // Left arm hanging naturally at rest, slightly splayed is Left side (so Z is negative)
-              rz = -0.15;
-              rx = 0.12; 
-            }
-          }
-          if (isForearmElbow) {
-            if (isRight) {
-              // Right elbow bent upwards and shaking sideways (high-frequency wave)
-              rx = 1.15;
-              ry = Math.sin(radiansPhase * 3.5) * 0.55; // pivot waving
-              rz = -0.15 + Math.cos(radiansPhase * 3.5) * 0.15;
-            } else {
-              // Left elbow relaxed forward
-              rx = 0.22;
-            }
-          }
-          if (isSpine) {
-            // Torso shifts weight to the left to counterweight the high wave on the right
-            rx = 0.04 + Math.sin(radiansPhase) * 0.02;
-            rz = -0.06 + Math.sin(radiansPhase * 2.0) * 0.03; // rhythmic body balance swaying
-          }
-          if (isNeckHead) {
-            // Gentle nodding tilts towards the hand
-            rz = 0.05 + Math.cos(radiansPhase * 2.0) * 0.04;
-            rx = 0.04;
-          }
-        } else if (style === 'dance') {
-          // Salsa hip rolls & rhythmic torso ripples (S-curve spine flow and bouncing knee-drops)
-          if (isPelvis) {
-            rz = Math.sin(radiansPhase) * 0.28; // Elegant side sway
-            ry = Math.cos(radiansPhase) * 0.18; // rhythmic twist
-            rx = Math.abs(Math.cos(radiansPhase)) * -0.08 - 0.05; // double-pace drop bounce
-          }
-          if (isSpine) {
-            // Torso is phase-delayed by pi/4 to create a snake-like ripple effect
-            const rippleSec = radiansPhase - Math.PI / 4.0;
-            rx = Math.sin(radiansPhase * 2.0 - Math.PI / 4.0) * 0.12; // deep bounce contraction
-            rz = -Math.sin(rippleSec) * 0.22; // counter balances hips lateral swing
-            ry = -Math.sin(radiansPhase) * 0.12;
-          }
-          if (isNeckHead) {
-            rz = Math.sin(radiansPhase) * 0.08;
-            rx = 0.04 + Math.sin(radiansPhase * 2.0) * 0.03;
-          }
-          if (isShoulderArm) {
-            // Elegant asynchronous arm waves
-            if (isLeft) {
-              rz = -0.65 + Math.sin(radiansPhase) * 0.25;
-              rx = 0.2 + Math.cos(radiansPhase) * 0.25;
-            } else {
-              rz = 0.65 + Math.cos(radiansPhase) * 0.25;
-              rx = 0.2 + Math.sin(radiansPhase) * 0.25;
-            }
-          }
-          if (isForearmElbow) {
-            // Double speed punch-coordination curl
-            if (isLeft) {
-              rx = 0.75 + Math.sin(radiansPhase * 2.0) * 0.25;
-            } else {
-              rx = 0.75 + Math.cos(radiansPhase * 2.0) * 0.25;
-            }
-          }
-          if (isThighHip) {
-            // Pelvis weight transfer to knee bend
-            const baseLeg = isLeft ? radiansPhase : radiansPhase + Math.PI;
-            rx = -0.05 - Math.max(0, Math.sin(baseLeg) * 0.12);
-          }
-          if (isKneeCalf) {
-            const baseLeg = isLeft ? radiansPhase : radiansPhase + Math.PI;
-            rx = 0.20 + Math.sin(baseLeg) * 0.18;
-          }
-          if (isFoot) {
-            const baseLeg = isLeft ? radiansPhase : radiansPhase + Math.PI;
-            rx = Math.max(0, -Math.sin(baseLeg)) * 0.15;
-          }
-        } else if (style === 'walk') {
-          // Leg and arm movements are exactly 180 degrees out of phase across sagittal/coronal splits,
-          // using anatomical parameters tracking a genuine human walking gait:
-          const offsetPhase = isLeft ? radiansPhase : radiansPhase + Math.PI;
-
-          if (isThighHip) {
-            // Hip flexion has peak angle of 23° / 0.4 rad (swing forward, negative) 
-            // and extension of 11° / -0.2 rad (stance backward, positive)
-            rx = -0.10 + Math.sin(offsetPhase) * 0.30; 
-            rz = (isLeft ? -1 : 1) * 0.05; // natural splay width
-          }
-          
-          if (isKneeCalf) {
-            // Biomechanically accurate double-peak knee action:
-            // Peak 1: Early swing phase flexion to let foot clear ground (approx 55 degrees / 0.95 rad)
-            // Peak 2: Stance phase shock absorption / dampening (approx 12 degrees / 0.20 rad)
-            const legSwing = Math.sin(offsetPhase);
-            rx = legSwing > 0 
-              ? legSwing * 0.95 + 0.05 
-              : Math.max(0.05, Math.abs(legSwing) * 0.24); // smooth spring loading during stance
-          }
-
-          if (isFoot) {
-            // Dorsiflexes up (rx < 0) during swing to avoid toe-drag; plantarflexes down (rx > 0) at push-off
-            const legSwing = Math.sin(offsetPhase);
-            rx = legSwing > 0 ? -0.12 : 0.22 * Math.sin(offsetPhase + 0.2);
-          }
-          
-          if (isShoulderArm) {
-            // Arm swings opposite to same-side leg
-            const armPhase = isLeft ? radiansPhase + Math.PI : radiansPhase;
-            rx = Math.sin(armPhase) * 0.28; // swing amplitude
-            rz = (isLeft ? -1 : 1) * (0.15 + Math.sin(radiansPhase) * 0.04); // clear hip profile dynamically
-          }
-          
-          if (isForearmElbow) {
-            const armPhase = isLeft ? radiansPhase + Math.PI : radiansPhase;
-            // Elbow angles flex forward when arm swings forward, and extends swing back
-            rx = 0.40 + Math.sin(armPhase) * 0.18;
-          }
-
-          if (isPelvis) {
-            // Transverse pelvis rot, hip drop on swing leg and double vertical bobbing
-            // Hips bounce down twice per full stride cycle (during double-support transfer)
-            rx = -0.04 + Math.sin(radiansPhase * 2.0) * 0.03;
-            rz = Math.sin(radiansPhase) * 0.04; // coronal tilt
-            ry = Math.cos(radiansPhase) * 0.06; // transverse twist
-          }
-          
-          if (isSpine) {
-            // Upper spine and shoulder girdle rotate opposite to keep alignment
-            ry = -Math.cos(radiansPhase) * 0.04;
-            rz = -Math.sin(radiansPhase) * 0.03;
-            rx = 0.03 + Math.sin(radiansPhase * 2.0) * 0.01;
-          }
-
-          if (isNeckHead) {
-            // Head is anatomically stabilized, correcting for hip/chest rotations
-            rx = 0.02 - Math.sin(radiansPhase * 2.0) * 0.015;
-            rz = -Math.sin(radiansPhase) * 0.01;
-          }
-        } else {
-          // Elegant classical bowing movement using a custom power phase curve f(x) = sin^2(x)
-          // to slow down at the maximum stretch state for a respectful posture holding:
-          const scale = Math.pow(Math.sin(radiansPhase / 2.0), 2.2);
-
-          if (isSpine) {
-            // Deep chest-head-spine coordinate hinge
-            rx = scale * 0.75; // ~43 degrees forward bow
-          }
-          if (isPelvis) {
-            // Hips slide slightly backwards to offset gravity shift (keeping balance)
-            rx = scale * 0.22;
-          }
-          if (isNeckHead) {
-            // Head tilts down respecting spine angle
-            rx = scale * 0.32;
-          }
-          if (isThighHip) {
-            rx = scale * 0.16; // soft hip tilt flex
-          }
-          if (isKneeCalf) {
-            rx = scale * 0.12; // slight knee cushion
-          }
-          if (isFoot) {
-            rx = scale * -0.04;
-          }
-          if (isShoulderArm) {
-            // Hands slide gracefully along the side/front of thighs symmetrically
-            rz = (isLeft ? -1 : 1) * (0.16 - scale * 0.08);
-            rx = scale * -0.28;
-          }
-          if (isForearmElbow) {
-            rx = scale * 0.15; // natural thumb alignment bend
-          }
-        }
-
-        rotationsMap[joint.id] = [rx, ry, rz];
-      });
-
-      newKeyframes.push({ frame: f, rotations: rotationsMap });
     });
-
     onKeyframesUpdate(newKeyframes);
     onFrameChange(0);
     setTimeout(() => {
@@ -363,39 +141,12 @@ export default function Timeline({
 
           <div className="flex gap-2 text-[10px]" onClick={(e) => e.stopPropagation()}>
             <button
-              onClick={() => applyPresetAnimation('wave')}
-              className="flex items-center gap-1 bg-indigo-500/20 hover:bg-indigo-500 text-indigo-300 hover:text-white px-2.5 py-1 rounded transition duration-150 cursor-pointer"
-            >
-              <Sparkles className="w-3 h-3" />
-              <span>招手预设</span>
-            </button>
-            <button
-              onClick={() => applyPresetAnimation('dance')}
-              className="flex items-center gap-1 bg-violet-500/20 hover:bg-violet-500 text-violet-300 hover:text-white px-2.5 py-1 rounded transition duration-150 cursor-pointer"
-            >
-              <Zap className="w-3 h-3" />
-              <span>摇摆热舞</span>
-            </button>
-            <button
-              onClick={() => applyPresetAnimation('walk')}
-              className="flex items-center gap-1 bg-sky-500/20 hover:bg-sky-500 text-sky-300 hover:text-white px-2.5 py-1 rounded transition duration-150 cursor-pointer"
-            >
-              <Rewind className="w-3 h-3 rotate-180" />
-              <span>步行姿态</span>
-            </button>
-            <button
-              onClick={() => applyPresetAnimation('ik-walk')}
+              onClick={() => applyPresetAnimation()}
               className="flex items-center gap-1 bg-amber-500/10 hover:bg-amber-550 border border-amber-500/30 text-amber-300 hover:text-white px-2.5 py-1 rounded transition duration-150 cursor-pointer font-bold"
-              title="使用 3D CCD-IK 逆向动力学算子物理生成骨骼步态轨迹"
+              title="使用 3D CCD-IK 逆向动力学算子物理生成智能摆臂步态轨迹"
             >
               <Move className="w-3 h-3" />
-              <span>IK 智能步态</span>
-            </button>
-            <button
-              onClick={() => applyPresetAnimation('bend')}
-              className="flex items-center gap-1 bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-white px-2.5 py-1 rounded transition duration-150 cursor-pointer"
-            >
-              <span>深腹鞠躬</span>
+              <span>IK 智能摆臂步态</span>
             </button>
           </div>
         </div>
