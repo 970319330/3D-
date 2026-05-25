@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useEffect, useRef } from 'react';
-import { EditorMode, JointNode, WeightBrushSettings, KeyframeData, MoodState, MoodDelta } from './types';
+import { EditorMode, JointNode, WeightBrushSettings, KeyframeData, EmotionState, EmotionImpact, BehaviorIntent, NeedState, NeedType, MoodPromptContext, AbandonmentTier, GamePrompt, GameResult } from './types';
 import { getPresetSkeletons } from './utils/rigging';
 import { MoodEngine } from './utils/moodEngine';
 import Viewport from './components/Viewport';
@@ -50,29 +50,79 @@ export default function App() {
   // Auto-rig execution counter
   const [autoRigTrigger, setAutoRigTrigger] = useState<number>(0);
 
-  // Mood system state
+  // Mood system state — v2: 性格→需求→情绪 三层架构
   const moodEngineRef = useRef<MoodEngine>(new MoodEngine());
-  const [moodState, setMoodState] = useState<MoodState>(moodEngineRef.current.getState());
-  const [moodEventTrigger, setMoodEventTrigger] = useState<number>(0); // increment on each threshold event
+  const [emotion, setEmotion] = useState<EmotionState>(moodEngineRef.current.getEmotion());
+  const [needs, setNeeds] = useState<Record<NeedType, NeedState>>(moodEngineRef.current.getNeeds());
+  const [intent, setIntent] = useState<BehaviorIntent | null>(null);
+  const [promptContext, setPromptContext] = useState<MoodPromptContext>(moodEngineRef.current.getPromptContext());
+  const [moodEventTrigger, setMoodEventTrigger] = useState<number>(0);
+
+  // Abandonment system
+  const [abandonment, setAbandonment] = useState<number>(0);
+  const [abandonmentTier, setAbandonmentTier] = useState<AbandonmentTier>('none');
+  const [activeGame, setActiveGame] = useState<GamePrompt | null>(null);
 
   // Mood tick timer — runs every 1 second
   useEffect(() => {
     const interval = setInterval(() => {
       const engine = moodEngineRef.current;
-      const events = engine.tick(1000);
-      setMoodState(engine.getState());
+      const result = engine.tick(1000);
+      setEmotion(engine.getEmotion());
+      setNeeds(engine.getNeeds());
+      setAbandonment(engine.getAbandonment());
+      const newTier = engine.getAbandonmentTier();
+      setAbandonmentTier((prev: AbandonmentTier) => prev !== newTier ? newTier : prev);
 
-      // Signal LLMCompanion to immediately check for proactive chat
-      if (events.length > 0) {
+      // Signal LLMCompanion when behavior intent emerges
+      if (result.hasBehaviorIntent && result.intent) {
+        setIntent(result.intent);
+        setPromptContext(engine.getPromptContext());
         setMoodEventTrigger((prev: number) => prev + 1);
       }
     }, 1000);
     return () => clearInterval(interval);
   }, []);
 
-  const handleMoodDelta = (delta: import('./types').MoodDelta) => {
-    moodEngineRef.current.applyDelta(delta);
-    setMoodState(moodEngineRef.current.getState());
+  /** 用户发送消息 → 满足需求、影响情绪 */
+  const handleUserMessage = (text: string) => {
+    const engine = moodEngineRef.current;
+    engine.onUserMessage(text);
+    setEmotion(engine.getEmotion());
+    setNeeds(engine.getNeeds());
+    setAbandonment(engine.getAbandonment());
+    setAbandonmentTier(engine.getAbandonmentTier());
+  };
+
+  /** AI 发送主动消息 → 记录 */
+  const handleProactiveSent = (snippet: string = '') => {
+    const engine = moodEngineRef.current;
+    engine.onProactiveSent(snippet);
+    setNeeds(engine.getNeeds());
+    setAbandonment(engine.getAbandonment());
+    setAbandonmentTier(engine.getAbandonmentTier());
+  };
+
+  // Reset mood engine to fresh state
+  const handleResetMood = () => {
+    const engine = new MoodEngine();
+    moodEngineRef.current = engine;
+    setEmotion(engine.getEmotion());
+    setNeeds(engine.getNeeds());
+    setIntent(null);
+    setPromptContext(engine.getPromptContext());
+    setAbandonment(0);
+    setAbandonmentTier('none');
+    setActiveGame(null);
+  };
+
+  // Game complete — apply emotion impact, clear game state
+  const handleGameComplete = (result: GameResult) => {
+    if (result.emotionImpact) {
+      moodEngineRef.current.applyImpact(result.emotionImpact);
+      setEmotion(moodEngineRef.current.getEmotion());
+    }
+    setActiveGame(null);
   };
 
   // Clean skin index & skin weight buffers updated by WebGL Viewport
@@ -270,9 +320,26 @@ export default function App() {
               <LLMCompanion
                 detectedClips={detectedClips}
                 onTriggerAnimation={setExternalActiveClipName}
-                moodState={moodState}
-                onMoodDelta={handleMoodDelta}
+                emotion={emotion}
+                needs={needs}
+                intent={intent}
+                promptContext={promptContext}
                 moodEventTrigger={moodEventTrigger}
+                joints={joints}
+                onMotionGenerated={(kfs) => {
+                  setKeyframes(kfs);
+                  setEditorMode('animate');
+                }}
+                isPlaying={isPlaying}
+                onSetPlaying={setIsPlaying}
+                abandonment={abandonment}
+                abandonmentTier={abandonmentTier}
+                activeGame={activeGame}
+                onUserMessage={handleUserMessage}
+                onProactiveSent={handleProactiveSent}
+                onGameStart={(game: GamePrompt) => setActiveGame(game)}
+                onGameComplete={handleGameComplete}
+                onResetMood={handleResetMood}
               />
             </div>
           ) : (
