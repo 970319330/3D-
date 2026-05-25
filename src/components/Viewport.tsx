@@ -117,8 +117,7 @@ export default function Viewport({
     showroomSpeed,
     hdrPreset,
     customHdrFile,
-    useHdrAsBackground,
-    showSkeleton: true
+    useHdrAsBackground
   });
 
   // Track if we need to rebuild the geometry or hierarchy
@@ -134,9 +133,6 @@ export default function Viewport({
   // Collapsible panel states (default collapsed!)
   const [isShowroomCollapsed, setIsShowroomCollapsed] = useState<boolean>(true);
   const [isNavCollapsed, setIsNavCollapsed] = useState<boolean>(true);
-
-  // Skeleton visibility toggle (for observing character motion without visualizer clutter)
-  const [showSkeleton, setShowSkeleton] = useState<boolean>(true);
 
   // Update mutables to bypass useEffect re-binding latency in high-freq canvas interaction
   useEffect(() => {
@@ -155,10 +151,9 @@ export default function Viewport({
       showroomSpeed,
       hdrPreset,
       customHdrFile,
-      useHdrAsBackground,
-      showSkeleton
+      useHdrAsBackground
     };
-  }, [joints, selectedJointId, editorMode, activeModelType, customModelFile, weightBrush, isPaintingActive, currentFrame, keyframes, isShowroomActive, isGltfAnimating, showroomSpeed, hdrPreset, customHdrFile, useHdrAsBackground, showSkeleton]);
+  }, [joints, selectedJointId, editorMode, activeModelType, customModelFile, weightBrush, isPaintingActive, currentFrame, keyframes, isShowroomActive, isGltfAnimating, showroomSpeed, hdrPreset, customHdrFile, useHdrAsBackground]);
 
   // Handle auto-rig execution from props
   useEffect(() => {
@@ -434,11 +429,11 @@ export default function Viewport({
         t.mainMesh.visible = true;
       }
       
-      // Make skeletons visible if we list any joints (respect showSkeleton toggle)
-      if (t.jointVisualizersGroup) t.jointVisualizersGroup.visible = showSkeleton;
-      if (t.boneVisualizersGroup) t.boneVisualizersGroup.visible = showSkeleton;
+      // Make skeletons visible if we list any joints
+      if (t.jointVisualizersGroup) t.jointVisualizersGroup.visible = true;
+      if (t.boneVisualizersGroup) t.boneVisualizersGroup.visible = true;
     }
-  }, [isShowroomActive, activeModelType, joints, showSkeleton]);
+  }, [isShowroomActive, activeModelType, joints]);
 
   // Directly play a clip on the mixer, bypassing React state for immediate transition.
   // Used by the 'finished' event handler to avoid the 1-2 frame delay of setState + re-render.
@@ -672,11 +667,6 @@ export default function Viewport({
           // Apply manual rigging and bone transforms
           applyBoneTransforms();
 
-          // Ensure SkinnedMesh recalculates skinning matrices after bone transforms
-          if (t.mainMesh && t.mainMesh instanceof THREE.SkinnedMesh) {
-            t.mainMesh.updateMatrixWorld(true);
-          }
-
           // Update skeleton visualizers to follow bones
           updateSkeletonVisualizers();
         } else {
@@ -902,7 +892,6 @@ export default function Viewport({
           }
         }
         bone.rotation.set(rotX, rotY, rotZ);
-        bone.updateMatrixWorld(true);
       });
     } else {
       // In non-animate modes, apply local posing sliders directly for active editing feedback
@@ -910,7 +899,6 @@ export default function Viewport({
         const jointNode = state.joints.find(j => j.name === bone.name);
         if (jointNode) {
           bone.rotation.set(jointNode.rotation[0], jointNode.rotation[1], jointNode.rotation[2]);
-          bone.updateMatrixWorld(true);
         }
       });
     }
@@ -2469,8 +2457,8 @@ export default function Viewport({
       t.boneVisualizersGroup.remove(child);
     }
 
-    // Only draw skeletal guides in designated structural modes or when skeleton visibility is off
-    if (state.editorMode === 'edit-model' || !state.showSkeleton) {
+    // Only draw skeletal guides in designated structural modes
+    if (state.editorMode === 'edit-model') {
       return;
     }
 
@@ -3366,20 +3354,6 @@ export default function Viewport({
 
       {/* Navigation Instruction Guide */}
       <div className="absolute top-4 left-4 pointer-events-none flex flex-col gap-2 z-10">
-        {/* Standalone skeleton visibility toggle — always visible regardless of nav panel state */}
-        <div className="pointer-events-auto">
-          <button
-            onClick={() => setShowSkeleton(prev => !prev)}
-            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-[11px] font-semibold cursor-pointer transition shadow-xl ${
-              showSkeleton
-                ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20'
-                : 'bg-slate-900 border-slate-700/60 text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <span className={`w-2 h-2 rounded-full ${showSkeleton ? 'bg-emerald-400' : 'bg-slate-600'}`} />
-            <span>{showSkeleton ? '隐藏骨架' : '显示骨架'}</span>
-          </button>
-        </div>
         <div className="bg-slate-900/90 backdrop-blur border border-slate-700/60 rounded-lg p-3 text-xs shadow-xl flex flex-col gap-1.5 text-slate-300 pointer-events-auto">
           <div 
             onClick={() => setIsNavCollapsed(!isNavCollapsed)}
@@ -3399,18 +3373,6 @@ export default function Viewport({
               <p>🖱️ <strong className="text-slate-100">平移相机</strong>: 鼠标右键 或 Shift + 拖拽</p>
               <p>🖱️ <strong className="text-slate-100">缩放视角</strong>: 滚轮滑动</p>
               <p>🟢 <strong className="text-slate-100">骨骼节点</strong>: 绿圆球。鼠标左键点击可直接选中</p>
-              <div className="border-t border-slate-800/60 pt-1.5 mt-1 flex items-center justify-between">
-                <span className="text-[10px] text-slate-400">显示骨骼</span>
-                <label className="relative inline-flex items-center cursor-pointer select-none">
-                  <input
-                    type="checkbox"
-                    checked={showSkeleton}
-                    onChange={(e) => setShowSkeleton(e.target.checked)}
-                    className="sr-only peer"
-                  />
-                  <div className="w-8 h-4 bg-slate-800 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-slate-300 after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-emerald-600 peer-checked:after:bg-white" />
-                </label>
-              </div>
             </div>
           )}
         </div>

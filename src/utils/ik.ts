@@ -244,25 +244,10 @@ export function generateIKWalkCycle(baseJoints: JointNode[]): Record<string, [nu
   const leftFootX = lFootJoint ? lFootJoint.position[0] : -0.4;
   const rightFootX = rFootJoint ? rFootJoint.position[0] : 0.4;
 
-  // Calculate arm base positions from T-pose (resting pose)
-  // For T-pose models, shoulder is the reference point
-  let shoulderY = hipY + (legLength * 0.5); // Shoulders typically halfway up torso
-  if (lShoulderJoint) {
-    shoulderY = lShoulderJoint.position[1];
-  }
-
-  // In T-pose, arms are extended to the side; calculate comfortable rest position
-  // Use elbow position as reference for natural arm center in T-pose
-  const leftArmX = lElbowJoint ? lElbowJoint.position[0] : -1.0;
-  const rightArmX = rElbowJoint ? rElbowJoint.position[0] : 1.0;
-  
-  // For natural walking, elbows hang near hip level, not at T-pose shoulder height
-  const armY = hipY + (legLength * 0.15);
-  
-  // Arm swing depth range clamped to [-0.2, 0.2] for natural gait
-  const armSwingZ = 0.2;
-  // Lateral arm swing in X axis - arms naturally swing closer to body during walk
-  const armSwingX = Math.abs(leftArmX) * 0.35; // ~35% of T-pose extension
+  const leftArmX = lElbowJoint ? lElbowJoint.position[0] : -1.4;
+  const rightArmX = rElbowJoint ? rElbowJoint.position[0] : 1.4;
+  const armY = lElbowJoint ? lElbowJoint.position[1] : 1.25;
+  const armSwingZ = legLength * 0.15;
 
   // Find exact chain paths
   const leftLegChain = (lHipJoint && lFootJoint) ? findChainPath(lHipJoint.id, lFootJoint.id) : ['l_hip', 'l_knee', 'l_foot'];
@@ -337,22 +322,8 @@ export function generateIKWalkCycle(baseJoints: JointNode[]): Record<string, [nu
     }
 
     // Arm swings balancing weight opposite to legs
-    // Enhanced arm swing with natural height variation and forward/backward motion
     const leftArmZ = Math.cos(phaseL) * armSwingZ;
     const rightArmZ = Math.cos(phaseR) * armSwingZ;
-    
-    // Add height variation to arm swing - arms go up slightly when swinging forward
-    // This creates a more natural walking motion with arm momentum
-    const armHeightVariationL = Math.sin(phaseL) * 0.07;
-    const armHeightVariationR = Math.sin(phaseR) * 0.07;
-    
-    const leftArmY = armY + armHeightVariationL;
-    const rightArmY = armY + armHeightVariationR;
-    
-    // In walking, arms swing closer to the body (X axis)
-    // T-pose arms are extended, but during walk they approach centerline
-    const leftArmXSwing = leftArmX * (0.65 + Math.cos(phaseL) * 0.15); // 0.5-0.8 of T-pose width
-    const rightArmXSwing = rightArmX * (0.65 + Math.cos(phaseR) * 0.15);
 
     // Solve Left Arm Arm-IK
     if (lElbowJoint && leftArmChain.length > 1) {
@@ -360,7 +331,7 @@ export function generateIKWalkCycle(baseJoints: JointNode[]): Record<string, [nu
         currentPose,
         leftArmChain,
         lElbowJoint.id,
-        [leftArmXSwing, leftArmY, leftArmZ],
+        [leftArmX, armY, leftArmZ],
         18
       );
     }
@@ -371,75 +342,10 @@ export function generateIKWalkCycle(baseJoints: JointNode[]): Record<string, [nu
         currentPose,
         rightArmChain,
         rElbowJoint.id,
-        [rightArmXSwing, rightArmY, rightArmZ],
+        [rightArmX, armY, rightArmZ],
         18
       );
     }
-    
-    // Add shoulder rotation to balance hip twist - opposite rotation creates natural counterbalance
-    // This makes the upper body move opposite to the lower body, which is how humans naturally walk
-    currentPose = currentPose.map(j => {
-      const nameL = j.name.toLowerCase();
-      const idL = j.id.toLowerCase();
-      const isLShoulder = (idL === 'l_shoulder' || nameL.includes('l_shoulder')) && 
-                          (idL.includes('shoulder') || nameL.includes('shoulder'));
-      const isRShoulder = (idL === 'r_shoulder' || nameL.includes('r_shoulder')) && 
-                          (idL.includes('shoulder') || nameL.includes('shoulder'));
-      
-      // Enhance elbow bend variation - elbows bend more when swinging forward, less when back
-      const isLElbow = (idL === 'l_elbow' || nameL.includes('l_elbow')) && 
-                       (idL.includes('elbow') || nameL.includes('elbow'));
-      const isRElbow = (idL === 'r_elbow' || nameL.includes('r_elbow')) && 
-                       (idL.includes('elbow') || nameL.includes('elbow'));
-      
-      if (isLShoulder) {
-        // Blend CCD-IK rotation with subtle hip counter-rotation for natural upper body motion
-        return {
-          ...j,
-          rotation: [
-            j.rotation[0] + 0.01,
-            j.rotation[1] + hipTwistY * 0.45,
-            j.rotation[2] - hipSwayX * 0.35
-          ] as [number, number, number]
-        };
-      }
-      if (isRShoulder) {
-        return {
-          ...j,
-          rotation: [
-            j.rotation[0] + 0.01,
-            j.rotation[1] + hipTwistY * 0.45,
-            j.rotation[2] + hipSwayX * 0.35
-          ] as [number, number, number]
-        };
-      }
-      
-      // Add natural elbow bend variations - more flexion during forward swing
-      if (isLElbow) {
-        const elbowBendL = Math.abs(Math.sin(phaseL)) * 0.25; // Varies between 0 and 0.25 radians
-        return {
-          ...j,
-          rotation: [
-            Math.max(0.15, j.rotation[0] + elbowBendL),
-            j.rotation[1],
-            j.rotation[2]
-          ] as [number, number, number]
-        };
-      }
-      if (isRElbow) {
-        const elbowBendR = Math.abs(Math.sin(phaseR)) * 0.25; // Varies between 0 and 0.25 radians
-        return {
-          ...j,
-          rotation: [
-            Math.max(0.15, j.rotation[0] + elbowBendR),
-            j.rotation[1],
-            j.rotation[2]
-          ] as [number, number, number]
-        };
-      }
-      
-      return j;
-    });
 
     // Apply neck & spine stabilizing twists opposite to hip action
     currentPose = currentPose.map(j => {
