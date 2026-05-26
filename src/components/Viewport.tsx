@@ -8,9 +8,9 @@ import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader.js';
 import { EXRLoader } from 'three/examples/jsm/loaders/EXRLoader.js';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { TGALoader } from 'three/examples/jsm/loaders/TGALoader.js';
-import { JointNode, EditorMode, WeightBrushSettings, KeyframeData } from '../types';
+import { JointNode, EditorMode, WeightBrushSettings, KeyframeData, MoodState, MoodDelta } from '../types';
 import { calculateAutoWeights, getPresetSkeletons } from '../utils/rigging';
-import { Sparkles, Move3d, Paintbrush, RotateCw, Film, Play, Pause, Sun, Lightbulb, Sliders, UploadCloud } from 'lucide-react';
+import { Sparkles, Move3d, Paintbrush, RotateCw, Film, Play, Pause, Sun, Lightbulb, Sliders, UploadCloud, Camera } from 'lucide-react';
 
 interface ViewportProps {
   joints: JointNode[];
@@ -32,6 +32,8 @@ interface ViewportProps {
   onGltfClipsLoaded?: (clips: string[]) => void;
   externalActiveClipName?: string | null;
   onExternalClipPlayed?: () => void;
+  moodState?: MoodState;
+  onMoodDelta?: (delta: MoodDelta) => void;
 }
 
 function findStandbyClipName(clips: THREE.AnimationClip[]): string {
@@ -77,10 +79,30 @@ export default function Viewport({
   autoRigTrigger,
   onGltfClipsLoaded,
   externalActiveClipName,
-  onExternalClipPlayed
+  onExternalClipPlayed,
+  moodState,
+  onMoodDelta
 }: ViewportProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  // Cinematic Camera State & Ref
+  const [isCinematicCollapsed, setIsCinematicCollapsed] = useState<boolean>(false);
+  
+  const cinematicRef = useRef({
+    active: false,
+    transitioningOut: false,
+    progress: 0,
+    moodType: 'none' as 'none' | 'joy' | 'sadness' | 'anger' | 'surprised',
+    startTime: 0,
+    durationMs: 5000,
+    extraAngle: 0,
+    backedUp: false,
+    backupPos: new THREE.Vector3(),
+    backupTarget: new THREE.Vector3(),
+  });
+
+  const prevMoodRef = useRef<MoodState | null>(null);
 
   // State for original GLTF model animations & showroom mode
   const [gltfClips, setGltfClips] = useState<THREE.AnimationClip[]>([]);
@@ -135,7 +157,7 @@ export default function Viewport({
   const [isShowroomCollapsed, setIsShowroomCollapsed] = useState<boolean>(true);
   const [isNavCollapsed, setIsNavCollapsed] = useState<boolean>(true);
 
-  // Skeleton visibility toggle (for observing character motion without visualizer clutter)
+  // Show/Hide 3D Skeleton Visualizers
   const [showSkeleton, setShowSkeleton] = useState<boolean>(true);
 
   // Update mutables to bypass useEffect re-binding latency in high-freq canvas interaction
@@ -166,6 +188,265 @@ export default function Viewport({
       triggerAutoRigging();
     }
   }, [autoRigTrigger]);
+
+  // Get dynamic model height metric to scale cinematography proportionally
+  const getModelHeight = useCallback((): number => {
+    const t = threeRef.current;
+    if (!t) return 1.8;
+    const activeMesh = t.loadedGltfScene || t.mainMesh;
+    if (activeMesh && activeMesh.visible) {
+      const box = new THREE.Box3().setFromObject(activeMesh);
+      const size = new THREE.Vector3();
+      box.getSize(size);
+      if (size.y > 0.1) return size.y;
+    }
+    return 1.8;
+  }, []);
+
+  // Calculate dynamic front facing vector of character model
+  const getModelFacingDirection = useCallback((): THREE.Vector3 => {
+    const t = threeRef.current;
+    const forward = new THREE.Vector3(0, 0, 1); // default forward/look direction
+
+    if (!t) return forward;
+
+    // 1. Try to find Head bone and Face features hierarchy
+    let headBone: THREE.Object3D | null = null;
+    let faceFeatureBone: THREE.Object3D | null = null;
+
+    if (t.threeBones && t.threeBones.length > 0) {
+      headBone = t.threeBones.find(b => {
+        const name = b.name.toLowerCase();
+        return name.includes('head');
+      }) || null;
+
+      if (!headBone) {
+        headBone = t.threeBones.find(b => {
+          const name = b.name.toLowerCase();
+          return name.includes('neck');
+        }) || null;
+      }
+
+      // Try searching for sensory/facial joints like eyes, nose, mouth, jaw in bones list
+      faceFeatureBone = t.threeBones.find(b => {
+        const name = b.name.toLowerCase();
+        return (name.includes('eye') || name.includes('nose') || name.includes('jaw') || name.includes('mouth') || name.includes('face') || name.includes('head_end')) && !name.includes('eyebrow');
+      }) || null;
+    }
+
+    // 2. Traversal scan of scene components to identify face indicators
+    if (t.loadedGltfScene) {
+      if (!headBone) {
+        t.loadedGltfScene.traverse(child => {
+          const name = child.name.toLowerCase();
+          if (!headBone && (name.includes('head') || name.includes('neck'))) {
+            headBone = child;
+          }
+        });
+      }
+      t.loadedGltfScene.traverse(child => {
+        const name = child.name.toLowerCase();
+        if (!faceFeatureBone && (name.includes('eye') || name.includes('nose') || name.includes('jaw') || name.includes('mouth') || name.includes('face')) && !name.includes('eyebrow') && child !== headBone) {
+          faceFeatureBone = child;
+        }
+      });
+    }
+
+    // Calculate facing offset
+    if (headBone && faceFeatureBone) {
+      const headPos = new THREE.Vector3();
+      const featurePos = new THREE.Vector3();
+      headBone.getWorldPosition(headPos);
+      faceFeatureBone.getWorldPosition(featurePos);
+
+      const dir = new THREE.Vector3().subVectors(featurePos, headPos);
+      dir.y = 0; // lock to horizontal plane
+      if (dir.lengthSq() > 0.0001) {
+        dir.normalize();
+        return dir;
+      }
+    }
+
+    // 3. Fallback to Shoulder-span orthogonal coordinate projection
+    let leftArm: THREE.Object3D | null = null;
+    let rightArm: THREE.Object3D | null = null;
+
+    const findBone = (filter: (n: string) => boolean) => {
+      if (t.threeBones) {
+        const b = t.threeBones.find(x => filter(x.name.toLowerCase()));
+        if (b) return b;
+      }
+      let found: THREE.Object3D | null = null;
+      if (t.loadedGltfScene) {
+        t.loadedGltfScene.traverse(c => {
+          if (!found && filter(c.name.toLowerCase())) found = c;
+        });
+      }
+      return found;
+    };
+
+    leftArm = findBone(n => (n.includes('leftshoulder') || n.includes('l_shoulder') || n.includes('leftarm') || n.includes('l_arm') || n.includes('leftclavicle')) && !n.includes('forearm'));
+    rightArm = findBone(n => (n.includes('rightshoulder') || n.includes('r_shoulder') || n.includes('rightarm') || n.includes('r_arm') || n.includes('rightclavicle')) && !n.includes('forearm'));
+
+    if (leftArm && rightArm) {
+      const posL = new THREE.Vector3();
+      const posR = new THREE.Vector3();
+      leftArm.getWorldPosition(posL);
+      rightArm.getWorldPosition(posR);
+
+      const lateral = new THREE.Vector3().subVectors(posR, posL);
+      lateral.y = 0;
+      if (lateral.lengthSq() > 0.001) {
+        lateral.normalize();
+        const upVec = new THREE.Vector3(0, 1, 0);
+        const faceDir = new THREE.Vector3().crossVectors(lateral, upVec).normalize();
+        return faceDir;
+      }
+    }
+
+    return forward;
+  }, []);
+
+  // Dynamic Head Position Tracking (for facial or close-up focus based on bones or bounding boxes)
+  const getHeadWorldPosition = useCallback((): THREE.Vector3 => {
+    const t = threeRef.current;
+    if (!t) return new THREE.Vector3(0, 1.5, 0);
+
+    const targetPos = new THREE.Vector3();
+
+    // 1. Try to find a bone with name containing 'head', 'neck', or 'face'
+    let headBone: THREE.Bone | null = null;
+    if (t.threeBones && t.threeBones.length > 0) {
+      headBone = t.threeBones.find(b => {
+        const name = b.name.toLowerCase();
+        return name.includes('head') || name.includes('neck') || name.includes('face');
+      }) || null;
+    }
+
+    if (headBone) {
+      headBone.getWorldPosition(targetPos);
+      return targetPos;
+    }
+
+    // 2. Fallback to bounding box calculations of the visible mesh
+    const activeMesh = t.loadedGltfScene || t.mainMesh;
+    if (activeMesh && activeMesh.visible) {
+      const box = new THREE.Box3().setFromObject(activeMesh);
+      const size = new THREE.Vector3();
+      box.getSize(size);
+      const center = new THREE.Vector3();
+      box.getCenter(center);
+      
+      if (size.y > 0.1) {
+        // Face is roughly at top 15% height of the bounding box
+        targetPos.set(center.x, box.max.y - size.y * 0.15, center.z);
+        return targetPos;
+      }
+    }
+
+    // 3. Fallback to constant height relative to standard joints
+    const jointsState = joints;
+    const neckNode = jointsState.find(j => j.id === 'neck' || j.name.toLowerCase().includes('neck') || j.name.toLowerCase().includes('head'));
+    if (neckNode) {
+      targetPos.set(neckNode.position[0], neckNode.position[1] + 0.15, neckNode.position[2]);
+      return targetPos;
+    }
+
+    return new THREE.Vector3(0, 1.6, 0);
+  }, [joints]);
+
+  // Activate cinematic camera transition
+  const triggerCinematicCloseUp = useCallback((moodType: 'joy' | 'sadness' | 'anger' | 'surprised' | 'none') => {
+    const cin = cinematicRef.current;
+    const t = threeRef.current;
+    if (!t || !t.camera || !t.controls) return;
+
+    cin.active = true;
+    cin.transitioningOut = false;
+    cin.moodType = moodType;
+    cin.startTime = Date.now();
+    cin.durationMs = moodType === 'anger' ? 4000 : 5500; // anger focuses shorter/sharper
+    cin.extraAngle = 0;
+    
+    // Backup camera state
+    if (!cin.backedUp) {
+      cin.backupPos.copy(t.camera.position);
+      cin.backupTarget.copy(t.controls.target);
+      cin.backedUp = true;
+    }
+
+    // Lock OrbitControls rotation so user drags don't fight the camera anim
+    t.controls.enableRotate = false;
+    
+    console.log(`[AI智能运镜] 心情特写启动: ${moodType}`);
+  }, []);
+
+  // Trigger manual test which also injects delta directly in parent state
+  const handleManualMoodTrigger = useCallback((moodType: 'joy' | 'anger' | 'sadness') => {
+    let delta: MoodDelta = {};
+    if (moodType === 'joy') {
+      delta = { happiness: 45, energy: 20, anger: -10, sadness: -20 };
+    } else if (moodType === 'anger') {
+      delta = { anger: 50, happiness: -20, energy: 25, sadness: -5 };
+    } else if (moodType === 'sadness') {
+      delta = { sadness: 45, happiness: -25, energy: -20, anger: -5 };
+    }
+    
+    if (onMoodDelta) {
+      onMoodDelta(delta);
+    }
+    
+    triggerCinematicCloseUp(moodType);
+  }, [onMoodDelta, triggerCinematicCloseUp]);
+
+  // Smart transition/fluctuation watcher for mood changes
+  useEffect(() => {
+    if (!moodState) return;
+    
+    if (prevMoodRef.current) {
+      const prev = prevMoodRef.current;
+      const diffs = {
+        happiness: moodState.happiness - prev.happiness,
+        energy: moodState.energy - prev.energy,
+        anger: moodState.anger - prev.anger,
+        sadness: moodState.sadness - prev.sadness,
+      };
+
+      // Sum of absolute changes to evaluate "fluctuation" waves
+      const totalDelta = Math.abs(diffs.happiness) + Math.abs(diffs.energy) + Math.abs(diffs.anger) + Math.abs(diffs.sadness);
+
+      // Trigger if aggregate change exceeds 8, OR if any single dimension transitions by >= 5 points (avoiding micro noise)
+      const isSignificantChange = totalDelta >= 8.0 || 
+                                  Math.abs(diffs.happiness) >= 5.0 || 
+                                  Math.abs(diffs.anger) >= 5.0 || 
+                                  Math.abs(diffs.sadness) >= 5.0;
+
+      if (isSignificantChange) {
+        let dominantMood: 'joy' | 'sadness' | 'anger' | 'none' = 'none';
+        
+        // Target which mood went up or changed most
+        const maxDelta = Math.max(
+          Math.abs(diffs.happiness),
+          Math.abs(diffs.sadness),
+          Math.abs(diffs.anger)
+        );
+
+        if (maxDelta === Math.abs(diffs.happiness) && moodState.happiness > 50) {
+          dominantMood = 'joy';
+        } else if (maxDelta === Math.abs(diffs.sadness) && moodState.sadness > 40) {
+          dominantMood = 'sadness';
+        } else if (maxDelta === Math.abs(diffs.anger) && moodState.anger > 40) {
+          dominantMood = 'anger';
+        }
+
+        if (dominantMood !== 'none') {
+          triggerCinematicCloseUp(dominantMood);
+        }
+      }
+    }
+    
+    prevMoodRef.current = { ...moodState };
+  }, [moodState, triggerCinematicCloseUp]);
 
   // Synchronize custom lighting options & presets
   useEffect(() => {
@@ -434,7 +715,7 @@ export default function Viewport({
         t.mainMesh.visible = true;
       }
       
-      // Make skeletons visible if we list any joints (respect showSkeleton toggle)
+      // Make skeletons visible if we list any joints and we enable skeleton display
       if (t.jointVisualizersGroup) t.jointVisualizersGroup.visible = showSkeleton;
       if (t.boneVisualizersGroup) t.boneVisualizersGroup.visible = showSkeleton;
     }
@@ -672,17 +953,116 @@ export default function Viewport({
           // Apply manual rigging and bone transforms
           applyBoneTransforms();
 
-          // Ensure SkinnedMesh recalculates skinning matrices after bone transforms
-          if (t.mainMesh && t.mainMesh instanceof THREE.SkinnedMesh) {
-            t.mainMesh.updateMatrixWorld(true);
-          }
-
           // Update skeleton visualizers to follow bones
           updateSkeletonVisualizers();
+
+          // Maintain user skeleton visibility preference
+          if (t.jointVisualizersGroup) t.jointVisualizersGroup.visible = state.showSkeleton;
+          if (t.boneVisualizersGroup) t.boneVisualizersGroup.visible = state.showSkeleton;
         } else {
           // Suppress visualizer groups so we see native model clearly
           if (t.jointVisualizersGroup) t.jointVisualizersGroup.visible = false;
           if (t.boneVisualizersGroup) t.boneVisualizersGroup.visible = false;
+        }
+
+        // Cinematic Camera Solver (Updates target & position with easing, shake, and orbital panning)
+        const cin = cinematicRef.current;
+        if (cin.active) {
+          const targetProgress = cin.transitioningOut ? 0 : 1;
+          cin.progress += (targetProgress - cin.progress) * 0.086; // smooth lerp progress
+          cin.extraAngle += delta * 0.35; // slow circular orbital pan (运镜)
+
+          if (cin.progress > 0.005) {
+            const headPos = getHeadWorldPosition();
+            
+            // 1. Shrink dynamic camera near clip plane during closeup shots to prevent near-plane mesh clipping (穿模)
+            if (t.camera.near !== 0.02) {
+              t.camera.near = 0.02;
+              t.camera.updateProjectionMatrix();
+            }
+
+            // 2. Resolve model orientation vectors to translate local camera coordinates to world coordinates
+            const forwardDir = getModelFacingDirection();
+            const upDir = new THREE.Vector3(0, 1, 0);
+            const rightDir = new THREE.Vector3().crossVectors(upDir, forwardDir).normalize();
+
+            // 3. Resolve dynamic scale factor (proportional to model height) to lock down correct shot size & avoid mesh penetration
+            const mHeight = getModelHeight();
+            const scaleF = Math.max(0.3, Math.min(2.5, mHeight / 1.8));
+
+            let localX = 0.2;
+            let localY = 0.1;
+            let localZ = 1.15;
+
+            if (cin.moodType === 'anger') {
+              // Shaking close-up camera on anger wave
+              const shakeScale = 0.02 * cin.progress;
+              const shakeX = (Math.random() - 0.5) * shakeScale;
+              const shakeY = (Math.random() - 0.5) * shakeScale;
+              localX = shakeX;
+              localY = 0.12 + shakeY;
+              localZ = 0.82; // Intense close-up depth
+            } else if (cin.moodType === 'sadness') {
+              // Melancholic cinematic looking slightly from the side (3/4 face profile)
+              localX = 0.42;
+              localY = 0.25;
+              localZ = 1.25;
+            } else if (cin.moodType === 'joy') {
+              // Celebratory slow circular orbit orbit pan
+              const orbitR = 1.3;
+              const theta = cin.extraAngle;
+              localX = Math.sin(theta) * 0.6;
+              localY = 0.15;
+              localZ = Math.cos(theta) * orbitR;
+            }
+
+            // Multiply local offset coordinates by proportional scale factor
+            const worldOffset = new THREE.Vector3()
+              .addScaledVector(rightDir, localX * scaleF)
+              .addScaledVector(upDir, localY * scaleF)
+              .addScaledVector(forwardDir, localZ * scaleF);
+
+            const desiredTarget = headPos.clone();
+            const desiredCameraPos = headPos.clone().add(worldOffset);
+
+            // Interpolate controls target and camera position in world space
+            t.controls.target.lerp(desiredTarget, cin.progress);
+            t.camera.position.lerp(desiredCameraPos, cin.progress);
+
+            // 4. Hard collision bubble safeguard (stops camera from plunging into head/chest boundary)
+            const currentDist = t.camera.position.distanceTo(headPos);
+            const absoluteMinDist = 0.32 * scaleF;
+            if (currentDist < absoluteMinDist) {
+              const pushDir = new THREE.Vector3().subVectors(t.camera.position, headPos).normalize();
+              if (pushDir.lengthSq() < 0.01) {
+                pushDir.copy(forwardDir);
+              }
+              t.camera.position.copy(headPos).addScaledVector(pushDir, absoluteMinDist);
+            }
+          }
+
+          // Timeout check
+          if (Date.now() - cin.startTime > cin.durationMs && !cin.transitioningOut) {
+            cin.transitioningOut = true;
+          }
+
+          // Return transition complete
+          if (cin.transitioningOut && cin.progress < 0.01) {
+            cin.active = false;
+            cin.transitioningOut = false;
+            cin.backedUp = false;
+            t.controls.enableRotate = true; // Unlock controls rotation
+            
+            // Restore standard camera near clip plane properties
+            if (t.camera.near !== 0.1) {
+              t.camera.near = 0.1;
+              t.camera.updateProjectionMatrix();
+            }
+
+            // Restore back to original backup
+            t.camera.position.copy(cin.backupPos);
+            t.controls.target.copy(cin.backupTarget);
+          }
         }
 
         // Update OrbitControls
@@ -902,7 +1282,6 @@ export default function Viewport({
           }
         }
         bone.rotation.set(rotX, rotY, rotZ);
-        bone.updateMatrixWorld(true);
       });
     } else {
       // In non-animate modes, apply local posing sliders directly for active editing feedback
@@ -910,7 +1289,6 @@ export default function Viewport({
         const jointNode = state.joints.find(j => j.name === bone.name);
         if (jointNode) {
           bone.rotation.set(jointNode.rotation[0], jointNode.rotation[1], jointNode.rotation[2]);
-          bone.updateMatrixWorld(true);
         }
       });
     }
@@ -2469,8 +2847,8 @@ export default function Viewport({
       t.boneVisualizersGroup.remove(child);
     }
 
-    // Only draw skeletal guides in designated structural modes or when skeleton visibility is off
-    if (state.editorMode === 'edit-model' || !state.showSkeleton) {
+    // Only draw skeletal guides in designated structural modes
+    if (state.editorMode === 'edit-model') {
       return;
     }
 
@@ -3366,20 +3744,6 @@ export default function Viewport({
 
       {/* Navigation Instruction Guide */}
       <div className="absolute top-4 left-4 pointer-events-none flex flex-col gap-2 z-10">
-        {/* Standalone skeleton visibility toggle — always visible regardless of nav panel state */}
-        <div className="pointer-events-auto">
-          <button
-            onClick={() => setShowSkeleton(prev => !prev)}
-            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-[11px] font-semibold cursor-pointer transition shadow-xl ${
-              showSkeleton
-                ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20'
-                : 'bg-slate-900 border-slate-700/60 text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <span className={`w-2 h-2 rounded-full ${showSkeleton ? 'bg-emerald-400' : 'bg-slate-600'}`} />
-            <span>{showSkeleton ? '隐藏骨架' : '显示骨架'}</span>
-          </button>
-        </div>
         <div className="bg-slate-900/90 backdrop-blur border border-slate-700/60 rounded-lg p-3 text-xs shadow-xl flex flex-col gap-1.5 text-slate-300 pointer-events-auto">
           <div 
             onClick={() => setIsNavCollapsed(!isNavCollapsed)}
@@ -3399,16 +3763,18 @@ export default function Viewport({
               <p>🖱️ <strong className="text-slate-100">平移相机</strong>: 鼠标右键 或 Shift + 拖拽</p>
               <p>🖱️ <strong className="text-slate-100">缩放视角</strong>: 滚轮滑动</p>
               <p>🟢 <strong className="text-slate-100">骨骼节点</strong>: 绿圆球。鼠标左键点击可直接选中</p>
-              <div className="border-t border-slate-800/60 pt-1.5 mt-1 flex items-center justify-between">
-                <span className="text-[10px] text-slate-400">显示骨骼</span>
-                <label className="relative inline-flex items-center cursor-pointer select-none">
+              
+              <div className="border-t border-slate-800/60 my-1 pb-0.5" />
+              <div className="flex items-center justify-between gap-4 pointer-events-auto select-none mt-0.5">
+                <span className="text-slate-400 font-medium text-[11px]">显示3D骨干框架</span>
+                <label className="relative inline-flex items-center cursor-pointer">
                   <input
                     type="checkbox"
                     checked={showSkeleton}
                     onChange={(e) => setShowSkeleton(e.target.checked)}
                     className="sr-only peer"
                   />
-                  <div className="w-8 h-4 bg-slate-800 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-slate-300 after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-emerald-600 peer-checked:after:bg-white" />
+                  <div className="w-8 h-4 bg-slate-800 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-slate-300 after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-indigo-600 peer-checked:after:bg-white" />
                 </label>
               </div>
             </div>
@@ -3423,6 +3789,74 @@ export default function Viewport({
             </div>
             <p className="opacity-90">按住 <strong>鼠标左键 拖动</strong> 涂抹权重</p>
             <p className="opacity-90">当前选定骨骼: <strong className="text-white">{joints.find(j => j.id === selectedJointId)?.name || '未选择'}</strong></p>
+          </div>
+        )}
+      </div>
+
+      {/* Cinematic Camera Hud Panel */}
+      <div className="absolute bottom-4 left-4 bg-slate-900/95 backdrop-blur-sm border border-indigo-500/30 rounded-lg p-3 text-xs shadow-2xl flex flex-col gap-2 text-slate-300 pointer-events-auto w-[240px] z-10 transition-all duration-300 select-none animate-in fade-in duration-300">
+        <div 
+          onClick={() => setIsCinematicCollapsed(!isCinematicCollapsed)}
+          className="flex items-center justify-between gap-4 text-slate-100 font-bold border-b border-indigo-500/20 pb-1.5 cursor-pointer group"
+        >
+          <div className="flex items-center gap-1.5 text-indigo-400 group-hover:text-indigo-300 transition">
+            <Camera className="w-3.5 h-3.5 text-indigo-400 animate-pulse" />
+            <span>🎥 AI 智能镜头运镜系统</span>
+          </div>
+          <span className="text-[10px] text-slate-500 font-mono hover:text-slate-300">
+            {isCinematicCollapsed ? '展开 ↗' : '收起 ↘'}
+          </span>
+        </div>
+        
+        {!isCinematicCollapsed && (
+          <div className="flex flex-col gap-2 mt-1 animate-in fade-in duration-200">
+            <p className="text-[11px] text-slate-400 leading-normal">
+              检测人物 <strong>表情/心情剧烈过渡</strong> 时，镜头会自动捕获面部/头部特写，配合环境光影完成专业运镜。
+            </p>
+            
+            <div className="flex items-center justify-between bg-slate-950 p-1.5 rounded border border-slate-850">
+              <span className="text-slate-500 text-[10px]">当前运镜状态</span>
+              {cinematicRef.current.active ? (
+                <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-1.5 py-0.5 rounded-md font-semibold text-[10px] flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping inline-block" />
+                  特写中 ({cinematicRef.current.moodType === 'joy' ? '😊 狂喜' : cinematicRef.current.moodType === 'anger' ? '😡 暴怒' : '😢 悲伤'})
+                </span>
+              ) : (
+                <span className="text-slate-500 text-[10px]">标准监视</span>
+              )}
+            </div>
+
+            {/* Quick Test Controls */}
+            <div className="flex flex-col gap-1 mt-1">
+              <span className="text-[10px] text-slate-500 font-bold font-mono uppercase tracking-wider">运镜测试预览:</span>
+              <div className="grid grid-cols-3 gap-1">
+                <button
+                  type="button"
+                  onClick={() => handleManualMoodTrigger('joy')}
+                  className="bg-amber-500/10 hover:bg-amber-500/20 hover:border-amber-400/40 border border-amber-500/25 rounded py-1 text-[10px] text-amber-200 font-bold cursor-pointer text-center transition active:scale-[0.96]"
+                >
+                  😊 狂喜特写
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleManualMoodTrigger('anger')}
+                  className="bg-red-500/10 hover:bg-red-500/20 hover:border-red-400/40 border border-red-500/25 rounded py-1 text-[10px] text-red-200 font-bold cursor-pointer text-center transition active:scale-[0.96]"
+                >
+                  😡 暴怒聚焦
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleManualMoodTrigger('sadness')}
+                  className="bg-blue-500/10 hover:bg-blue-500/20 hover:border-blue-400/40 border border-blue-500/25 rounded py-1 text-[10px] text-blue-200 font-bold cursor-pointer text-center transition active:scale-[0.96]"
+                >
+                  😢 悲伤特写
+                </button>
+              </div>
+            </div>
+
+            <p className="text-[8.5px] text-slate-500 leading-normal mt-1 border-t border-slate-850 pt-1 leading-normal">
+              * 当在 AI 伴侣聊天框回复导致数值突变 5 点以上，该运镜会自动无缝触发。
+            </p>
           </div>
         )}
       </div>
