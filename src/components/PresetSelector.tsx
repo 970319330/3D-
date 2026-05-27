@@ -220,8 +220,11 @@ export default function PresetSelector({
               </div>
             )}
 
-            {/* Multiple Textures and Companion Files Block (OBJ, GLTF/GLB) */}
-            {(customFile.name.endsWith('.obj') || customFile.name.endsWith('.gltf') || customFile.name.endsWith('.glb')) && (
+            {/* Multiple Textures and Companion Files Block (OBJ, GLTF/GLB, FBX) */}
+            {(customFile.name.toLowerCase().endsWith('.obj') || 
+              customFile.name.toLowerCase().endsWith('.gltf') || 
+              customFile.name.toLowerCase().endsWith('.glb') ||
+              customFile.name.toLowerCase().endsWith('.fbx')) && (
               <div className="bg-slate-900/40 border border-[#1e293b] p-3 rounded-lg flex flex-col gap-2">
                 <div className="flex items-center justify-between">
                   <span className="text-[10px] font-bold text-emerald-405 uppercase tracking-wide flex items-center gap-1.5">

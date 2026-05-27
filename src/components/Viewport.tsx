@@ -8,6 +8,35 @@ import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader.js';
 import { EXRLoader } from 'three/examples/jsm/loaders/EXRLoader.js';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { TGALoader } from 'three/examples/jsm/loaders/TGALoader.js';
+
+// --- TGALoader Override ---
+// If the resolved texture URL is actually mapped to an uploaded PNG/JPG/JPEG file (since models may reference .tga
+// but user uploads standard web textures), intercept and delegate the loading to standard THREE.TextureLoader.
+const originalTGALoad = TGALoader.prototype.load;
+TGALoader.prototype.load = function (
+  this: any,
+  url: string,
+  onLoad?: any,
+  onProgress?: any,
+  onError?: any
+): any {
+  const lowerUrl = url.toLowerCase();
+  if (
+    lowerUrl.includes('#png') ||
+    lowerUrl.includes('.png') ||
+    lowerUrl.includes('#jpg') ||
+    lowerUrl.includes('.jpg') ||
+    lowerUrl.includes('#jpeg') ||
+    lowerUrl.includes('.jpeg')
+  ) {
+    console.log(`[TGA Loader Override] Redirecting TGA request "${url}" to standard TextureLoader in order to support PNG/JPG mapped files.`);
+    const texLoader = new THREE.TextureLoader(this.manager);
+    texLoader.setCrossOrigin(this.crossOrigin);
+    texLoader.setPath(this.path);
+    return texLoader.load(url, onLoad, onProgress, onError);
+  }
+  return originalTGALoad.call(this, url, onLoad, onProgress, onError);
+};
 import { JointNode, EditorMode, WeightBrushSettings, KeyframeData, MoodState, MoodDelta } from '../types';
 import { calculateAutoWeights, getPresetSkeletons } from '../utils/rigging';
 import { Sparkles, Move3d, Paintbrush, RotateCw, Film, Play, Pause, Sun, Lightbulb, Sliders, UploadCloud, Camera } from 'lucide-react';
@@ -877,6 +906,7 @@ export default function Viewport({
     loadedGltfScene?: THREE.Group | null;
     gltfMixer?: THREE.AnimationMixer | null;
     gltfClips?: THREE.AnimationClip[];
+    currentLoadId?: number;
   } | null>(null);
 
   // Track object URLs for local File memory recycling
@@ -1165,9 +1195,6 @@ export default function Viewport({
       }
     };
     animateLoop();
-
-    // Setup initial model model preset
-    loadModelpreset();
 
     return () => {
       cancelAnimationFrame(animationFrameId);
@@ -1825,6 +1852,10 @@ export default function Viewport({
     const t = threeRef.current;
     if (!t) return;
 
+    // Increment load identifier to cancel previous in-flight asynchronous operations
+    t.currentLoadId = (t.currentLoadId || 0) + 1;
+    const thisLoadId = t.currentLoadId;
+
     setLoadingError(null);
     setIsLoading(true);
 
@@ -2049,16 +2080,6 @@ export default function Viewport({
           return url;
         }
 
-        // If it's a blob url, only return early if it's one of our registered/uploaded files.
-        // If it's an unresolved relative-resolved blob URL (e.g. blob:https://domain/Image0.png),
-        // let it pass through to extract the filename and run our matching heuristics.
-        if (url.startsWith('blob:')) {
-          const isRegistered = allUploadedFiles.some((record) => record.url === url);
-          if (isRegistered) {
-            return url;
-          }
-        }
-
         // Decode the URL in case it includes percent-encoded characters like %20 for spaces
         let decodedUrl = url;
         try {
@@ -2077,24 +2098,59 @@ export default function Viewport({
         const lastDotIdx = fileName.lastIndexOf('.');
         const fileBase = lastDotIdx !== -1 ? fileName.substring(0, lastDotIdx) : fileName;
 
+        // If it's a blob url, check if it's one of our registered/uploaded files.
+        if (url.startsWith('blob:')) {
+          const isRegistered = allUploadedFiles.some((record) => record.url === url);
+          if (isRegistered) {
+            return url;
+          }
+          // If it is a real memory blob URL (typically no standard file filename extension),
+          // it must be returned unmodified so the browser can load the internal extracted texture perfectly.
+          if (!fileName.includes('.') || !/\.(png|jpg|jpeg|tga|bmp|gif|dds|exr|hdr|tiff?|bin|gltf|glb|obj|mtl)$/i.test(fileName)) {
+            return url;
+          }
+        }
+
         let bestMatch: typeof allUploadedFiles[0] | null = null;
         let maxScore = -1;
 
         allUploadedFiles.forEach((record) => {
           let score = 0;
           
+          const recLastDotIdx = record.cleanName.lastIndexOf('.');
+          const recBase = recLastDotIdx !== -1 ? record.cleanName.substring(0, recLastDotIdx) : record.cleanName;
+          
+          const recBaseLower = recBase.toLowerCase();
+          const fileBaseLower = fileBase.toLowerCase();
+
           // Check for exact file name match (including extension)
           if (record.cleanName === fileName) {
             score += 300;
-          } else {
-            // Check for extension-independent base name match (e.g., skin.tga vs skin.png)
-            const recLastDotIdx = record.cleanName.lastIndexOf('.');
-            const recBase = recLastDotIdx !== -1 ? record.cleanName.substring(0, recLastDotIdx) : record.cleanName;
-            
-            if (recBase && fileBase && recBase === fileBase) {
+          } else if (recBaseLower && fileBaseLower) {
+            if (recBaseLower === fileBaseLower) {
               score += 150; // High score but lower than exact extension match
-            } else if (fileBase && recBase && (fileBase.endsWith(recBase) || recBase.endsWith(fileBase))) {
-              score += 80;
+            } else if (fileBaseLower.endsWith(recBaseLower) || recBaseLower.endsWith(fileBaseLower)) {
+              score += 100;
+            } else if (fileBaseLower.includes(recBaseLower) || recBaseLower.includes(fileBaseLower)) {
+              score += 80; // Substring fuzzy match, e.g., 'body' matches 'body_diffuse' or 't_body_d'
+            } else {
+              // Semantic body parts matching to align face textures to face materials, body to body, etc.
+              const bodyParts = ['face', 'head', 'body', 'hair', 'eye', 'skin', 'glass', 'mouth', 'cloth', 'pants', 'shoe', 'hand', 'arm', 'leg', 'brow', 'lash'];
+              bodyParts.forEach((part) => {
+                if (fileBaseLower.includes(part) && recBaseLower.includes(part)) {
+                  score += 120;
+                }
+              });
+
+              // Share index matching (e.g. skin_01 vs texture_01)
+              const fileDigits = fileBaseLower.match(/\d+/g);
+              const recDigits = recBaseLower.match(/\d+/g);
+              if (fileDigits && recDigits) {
+                const hasOverlap = fileDigits.some(d => recDigits.includes(d));
+                if (hasOverlap) {
+                  score += 40;
+                }
+              }
             }
           }
 
@@ -2119,7 +2175,7 @@ export default function Viewport({
                 const reqDir = reqSegs[reqSegs.length - 1 - i];
                 
                 if (fileDir && reqDir && fileDir === reqDir) {
-                  folderBoost += 100; // Add 100 points for each matching parent directory segment
+                   folderBoost += 100; // Add 100 points for each matching parent directory segment
                 } else {
                   break; // Stop matching folder hierarchy once a mismatch is found
                 }
@@ -2136,6 +2192,10 @@ export default function Viewport({
 
         if (bestMatch && maxScore > 0) {
           console.log(`[路径引用规则匹配成功] 原请求资源: "${url}" (解析为: "${cleanUrl}"), 智能匹配映射为: "${bestMatch.file.name}" | 路径: "${bestMatch.webkitPath || '无'}" | 匹配分值: ${maxScore}`);
+          const matchExt = bestMatch.file.name.split('.').pop()?.toLowerCase() || '';
+          if (matchExt === 'png' || matchExt === 'jpg' || matchExt === 'jpeg') {
+            return `${bestMatch.url}#${matchExt}`;
+          }
           return bestMatch.url;
         }
         
@@ -2146,6 +2206,10 @@ export default function Viewport({
             // A: Only 1 custom texture uploaded -> Map everything here
             if (uploadedTextures.length === 1) {
               console.log(`[路径引用规则-单贴图降级匹配] 未找到相似度匹配，但由于仅有一个本地贴图，将资源请求 "${url}" 自动映射为: "${uploadedTextures[0].file.name}"`);
+              const matchExt = uploadedTextures[0].file.name.split('.').pop()?.toLowerCase() || '';
+              if (matchExt === 'png' || matchExt === 'jpg' || matchExt === 'jpeg') {
+                return `${uploadedTextures[0].url}#${matchExt}`;
+              }
               return uploadedTextures[0].url;
             }
 
@@ -2157,6 +2221,10 @@ export default function Viewport({
               if (index >= 0 && index < sortedTextures.length) {
                 const matched = sortedTextures[index];
                 console.log(`[路径引用规则-索引降级匹配] 未找到相似度匹配，根据数字索引 (${index}) 映射资源 "${url}" 为: "${matched.file.name}"`);
+                const matchExt = matched.file.name.split('.').pop()?.toLowerCase() || '';
+                if (matchExt === 'png' || matchExt === 'jpg' || matchExt === 'jpeg') {
+                  return `${matched.url}#${matchExt}`;
+                }
                 return matched.url;
               }
             }
@@ -2164,6 +2232,10 @@ export default function Viewport({
             // C: Sort alphabetically and take the first uploaded texture as fallback
             const sortedTextures = [...uploadedTextures].sort((a, b) => a.cleanName.localeCompare(b.cleanName));
             console.log(`[路径引用规则-首贴图降级匹配] 未找到相似度匹配，默认降级映射资源 "${url}" 至第一个本地贴图: "${sortedTextures[0].file.name}"`);
+            const matchExt = sortedTextures[0].file.name.split('.').pop()?.toLowerCase() || '';
+            if (matchExt === 'png' || matchExt === 'jpg' || matchExt === 'jpeg') {
+              return `${sortedTextures[0].url}#${matchExt}`;
+            }
             return sortedTextures[0].url;
           } else {
             // D: No texture files uploaded at all -> return 1x1 transparent Base64 image data URL
@@ -2187,6 +2259,10 @@ export default function Viewport({
           objLoader.load(
             objUrl,
             (obj) => {
+              if (t.currentLoadId !== thisLoadId) {
+                console.log(`[Discarding legacy OBJ load] Current: ${t.currentLoadId}, Callback: ${thisLoadId}`);
+                return;
+              }
               try {
                 if (materials) {
                   t.loadedTexture = null;
@@ -2204,6 +2280,7 @@ export default function Viewport({
             },
             undefined,
             (err: any) => {
+              if (t.currentLoadId !== thisLoadId) return;
               setLoadingError('OBJ模型加载失败: ' + (err?.message || '未知错误'));
               setIsLoading(false);
             }
@@ -2216,12 +2293,17 @@ export default function Viewport({
           mtlLoader.load(
             mtlUrl,
             (materials) => {
+              if (t.currentLoadId !== thisLoadId) {
+                console.log(`[Discarding legacy MTL load] Current: ${t.currentLoadId}, Callback: ${thisLoadId}`);
+                return;
+              }
               console.log("成功解析 MTL 材质:", materials);
               materials.preload();
               loadObj(materials);
             },
             undefined,
             (err) => {
+              if (t.currentLoadId !== thisLoadId) return;
               console.warn("MTL 材质文件加载/解析失败，将尝试不加载材质继续载入模型: ", err);
               loadObj(null);
             }
@@ -2235,6 +2317,10 @@ export default function Viewport({
         loader.load(
           fbxUrl,
           (fbxGroup) => {
+            if (t.currentLoadId !== thisLoadId) {
+              console.log(`[Discarding legacy FBX load] Current: ${t.currentLoadId}, Callback: ${thisLoadId}`);
+              return;
+            }
             try {
               // Convert materials to THREE.MeshStandardMaterial to support loaded standard/PBR textures & features properly
               fbxGroup.traverse((child) => {
@@ -2566,7 +2652,7 @@ export default function Viewport({
               if (loadedGeo) {
                 setupImportedGeometry(loadedGeo);
               } else {
-                throw new Error('无法在FBX文件中抽取有效的网格几何体，请确保文件包含网格(Mesh)结构');
+                throw new Error('无法在FBX文件中抽取有效的网格，其包含非网格结构');
               }
             } catch (err: any) {
               setLoadingError('FBX解析错误: ' + (err?.message || '未知错误'));
@@ -2575,14 +2661,12 @@ export default function Viewport({
           },
           undefined,
           (error: any) => {
+            if (t.currentLoadId !== thisLoadId) return;
             setLoadingError('FBX模型加载失败: ' + (error?.message || '未知错误'));
             setIsLoading(false);
           }
         );
-      } else {
-        // GLTF/GLB loader
-        // If there are companion files, use the manager with URL modifiers.
-        // Otherwise, use a standard loader to bypass any setURLModifier prefix interference for self-contained files.
+      } else if (extension === 'gltf' || extension === 'glb') {
         const loader = (customTextureFiles && customTextureFiles.length > 0)
           ? new GLTFLoader(manager)
           : new GLTFLoader();
@@ -2590,6 +2674,10 @@ export default function Viewport({
         loader.load(
           gltfUrl,
           (gltf) => {
+            if (t.currentLoadId !== thisLoadId) {
+              console.log(`[Discarding legacy GLTF load] Current: ${t.currentLoadId}, Callback: ${thisLoadId}`);
+              return;
+            }
             try {
               // Extract embedded texture if any
               let foundTexture: THREE.Texture | null = null;
@@ -2688,7 +2776,7 @@ export default function Viewport({
                 console.log("检测到模型中存在内置骨骼动画:", uniqueClips.map(c => c.name));
                 setGltfClips(uniqueClips);
                 setActiveClipName(uniqueClips[0].name);
-                
+
                 // Play it initially using our mixer
                 const action = mixer.clipAction(uniqueClips[0]);
                 action.reset().fadeIn(0.25).play();
@@ -2716,6 +2804,7 @@ export default function Viewport({
           },
           undefined,
           (error: any) => {
+            if (t.currentLoadId !== thisLoadId) return;
             setLoadingError('GLTF加载解析异常: ' + (error?.message || '文件损坏或不支持格式'));
             setIsLoading(false);
           }
