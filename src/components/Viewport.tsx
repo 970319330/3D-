@@ -34,6 +34,7 @@ interface ViewportProps {
   onExternalClipPlayed?: () => void;
   moodState?: MoodState;
   onMoodDelta?: (delta: MoodDelta) => void;
+  importedClips?: THREE.AnimationClip[];
 }
 
 function findStandbyClipName(clips: THREE.AnimationClip[]): string {
@@ -60,6 +61,33 @@ function projectJointToScreen(pos: [number, number, number], camera: THREE.Camer
   return { x, y };
 }
 
+/**
+ * Ensures all items in an array of animation clips have unique names.
+ * If a name collision occurs, it appends a distinct numerical suffix to a cloned clip.
+ */
+function ensureUniqueClipNames(clips: THREE.AnimationClip[]): THREE.AnimationClip[] {
+  const seen = new Set<string>();
+  return clips.map(clip => {
+    let name = clip.name || 'unnamed_clip';
+    if (seen.has(name)) {
+      let counter = 1;
+      let newName = `${name} (${counter})`;
+      while (seen.has(newName)) {
+        counter++;
+        newName = `${name} (${counter})`;
+      }
+      name = newName;
+      const cloned = clip.clone();
+      cloned.name = name;
+      seen.add(name);
+      return cloned;
+    } else {
+      seen.add(name);
+      return clip;
+    }
+  });
+}
+
 export default function Viewport({
   joints,
   selectedJointId,
@@ -81,7 +109,8 @@ export default function Viewport({
   externalActiveClipName,
   onExternalClipPlayed,
   moodState,
-  onMoodDelta
+  onMoodDelta,
+  importedClips
 }: ViewportProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -782,6 +811,39 @@ export default function Viewport({
       onGltfClipsLoaded(gltfClips.map(c => c.name));
     }
   }, [gltfClips, onGltfClipsLoaded]);
+
+  // Synchronize externally loaded skeleton animation clips to the active model
+  useEffect(() => {
+    const t = threeRef.current;
+    if (!t) return;
+
+    if (importedClips && importedClips.length > 0) {
+      console.log("Detecting new imported animation clips:", importedClips.map(c => c.name));
+      
+      // Filter out duplicate names from t.gltfClips or combined list to prevent double appends
+      const existingNames = new Set((t.gltfClips || []).map(c => c.name));
+      const freshClips = importedClips.filter(c => !existingNames.has(c.name));
+      
+      if (freshClips.length > 0) {
+        const combined = [...(t.gltfClips || []), ...freshClips];
+        const uniqueCombined = ensureUniqueClipNames(combined);
+        t.gltfClips = uniqueCombined;
+        setGltfClips(uniqueCombined);
+        
+        // Auto-play the newly imported clip if it's the latest
+        const latestClip = uniqueCombined[uniqueCombined.length - 1];
+        setActiveClipName(latestClip.name);
+        setIsShowroomActive(true); // Switch to 3D showroom to play it directly!
+        setIsGltfAnimating(true);
+        
+        if (t.gltfMixer) {
+          t.gltfMixer.stopAllAction();
+          const action = t.gltfMixer.clipAction(latestClip);
+          action.reset().fadeIn(0.25).play();
+        }
+      }
+    }
+  }, [importedClips]);
 
   // Play animation clip command from parent
   useEffect(() => {
@@ -2483,12 +2545,13 @@ export default function Viewport({
               t.gltfMixer = mixer;
 
               if (clips.length > 0) {
-                console.log("检测到FBX模型中存在内置骨骼动画:", clips.map(c => c.name));
-                setGltfClips(clips);
-                setActiveClipName(clips[0].name);
+                const uniqueClips = ensureUniqueClipNames(clips);
+                console.log("检测到FBX模型中存在内置骨骼动画:", uniqueClips.map(c => c.name));
+                setGltfClips(uniqueClips);
+                setActiveClipName(uniqueClips[0].name);
                 
                 // Play it initially using our mixer
-                const action = mixer.clipAction(clips[0]);
+                const action = mixer.clipAction(uniqueClips[0]);
                 action.reset().fadeIn(0.25).play();
 
                 setIsShowroomActive(true);
@@ -2621,12 +2684,13 @@ export default function Viewport({
               t.gltfMixer = mixer;
 
               if (clips.length > 0) {
-                console.log("检测到模型中存在内置骨骼动画:", clips.map(c => c.name));
-                setGltfClips(clips);
-                setActiveClipName(clips[0].name);
+                const uniqueClips = ensureUniqueClipNames(clips);
+                console.log("检测到模型中存在内置骨骼动画:", uniqueClips.map(c => c.name));
+                setGltfClips(uniqueClips);
+                setActiveClipName(uniqueClips[0].name);
                 
                 // Play it initially using our mixer
-                const action = mixer.clipAction(clips[0]);
+                const action = mixer.clipAction(uniqueClips[0]);
                 action.reset().fadeIn(0.25).play();
 
                 // Auto-toggle Showroom mode so animation auto-plays on load!
