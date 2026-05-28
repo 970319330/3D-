@@ -489,7 +489,7 @@ export default function App() {
 
           {/* POPUP 1: Skeleton Structure Configulator Modal */}
           {isSkeletonModalOpen && (
-            <div className="absolute top-16 right-4 z-40 bg-[#090f19]/95 backdrop-blur-md border border-indigo-500/30 rounded-2xl shadow-2xl w-[380px] max-h-[80%] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            <div className="absolute top-16 left-4 z-40 bg-[#090f19]/95 backdrop-blur-md border border-indigo-500/30 rounded-2xl shadow-2xl w-[380px] max-h-[80%] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150">
               <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800/80 bg-slate-950/40 shrink-0 select-none">
                 <div className="flex items-center gap-2">
                   <Workflow className="w-4 h-4 text-emerald-400" />
@@ -527,7 +527,7 @@ export default function App() {
 
           {/* POPUP 2: Weight Painter & Skinning Modal */}
           {isRiggingModalOpen && (
-            <div className="absolute top-16 right-4 z-40 bg-[#090f19]/95 backdrop-blur-md border border-indigo-500/30 rounded-2xl shadow-2xl w-[380px] max-h-[80%] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            <div className="absolute top-16 left-4 z-40 bg-[#090f19]/95 backdrop-blur-md border border-indigo-500/30 rounded-2xl shadow-2xl w-[380px] max-h-[80%] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150">
               <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800/80 bg-slate-950/40 shrink-0 select-none">
                 <div className="flex items-center gap-2">
                   <Paintbrush className="w-4 h-4 text-indigo-400" />

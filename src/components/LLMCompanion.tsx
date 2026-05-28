@@ -487,7 +487,7 @@ export default function LLMCompanion({
 
       {/* Mood Panel — always visible above messages */}
       <div ref={moodPanelRef} className="px-3 pt-3 pb-1 shrink-0">
-        <MoodPanel mood={moodState} />
+        <MoodPanel mood={moodState} onMoodDelta={onMoodDelta} />
       </div>
 
       {/* Model settings panels overlay */}

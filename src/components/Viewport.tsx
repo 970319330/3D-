@@ -144,23 +144,19 @@ export default function Viewport({
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  // Cinematic Camera State & Ref
-  const [isCinematicCollapsed, setIsCinematicCollapsed] = useState<boolean>(false);
-  
+  // Cinematic Camera State & Ref (With Talk-Lean support)
   const cinematicRef = useRef({
     active: false,
     transitioningOut: false,
     progress: 0,
-    moodType: 'none' as 'none' | 'joy' | 'sadness' | 'anger' | 'surprised',
+    moodType: 'none' as 'none' | 'joy' | 'sadness' | 'anger' | 'surprised' | 'talklean',
     startTime: 0,
-    durationMs: 5000,
+    durationMs: 12000,
     extraAngle: 0,
     backedUp: false,
     backupPos: new THREE.Vector3(),
     backupTarget: new THREE.Vector3(),
   });
-
-  const prevMoodRef = useRef<MoodState | null>(null);
 
   // State for original GLTF model animations & showroom mode
   const [gltfClips, setGltfClips] = useState<THREE.AnimationClip[]>([]);
@@ -214,6 +210,7 @@ export default function Viewport({
   // Collapsible panel states (default collapsed!)
   const [isShowroomCollapsed, setIsShowroomCollapsed] = useState<boolean>(true);
   const [isNavCollapsed, setIsNavCollapsed] = useState<boolean>(true);
+  const [isCinematicCollapsed, setIsCinematicCollapsed] = useState<boolean>(true);
 
   // Show/Hide 3D Skeleton Visualizers
   const [showSkeleton, setShowSkeleton] = useState<boolean>(true);
@@ -413,8 +410,8 @@ export default function Viewport({
     return new THREE.Vector3(0, 1.6, 0);
   }, [joints]);
 
-  // Activate cinematic camera transition
-  const triggerCinematicCloseUp = useCallback((moodType: 'joy' | 'sadness' | 'anger' | 'surprised' | 'none') => {
+  // Activate cinematic camera transition (With extra Talk-Lean face close-up capability)
+  const triggerCinematicCloseUp = useCallback((moodType: 'joy' | 'sadness' | 'anger' | 'surprised' | 'talklean' | 'none') => {
     const cin = cinematicRef.current;
     const t = threeRef.current;
     if (!t || !t.camera || !t.controls) return;
@@ -423,7 +420,7 @@ export default function Viewport({
     cin.transitioningOut = false;
     cin.moodType = moodType;
     cin.startTime = Date.now();
-    cin.durationMs = moodType === 'anger' ? 4000 : 5500; // anger focuses shorter/sharper
+    cin.durationMs = moodType === 'talklean' ? 12000 : (moodType === 'anger' ? 4000 : 5500); 
     cin.extraAngle = 0;
     
     // Backup camera state
@@ -436,7 +433,7 @@ export default function Viewport({
     // Lock OrbitControls rotation so user drags don't fight the camera anim
     t.controls.enableRotate = false;
     
-    console.log(`[AI智能运镜] 心情特写启动: ${moodType}`);
+    console.log(`[Talk-Lean 镜头特写] 镜头启动, 主题型: ${moodType}`);
   }, []);
 
   // Trigger manual test which also injects delta directly in parent state
@@ -457,10 +454,12 @@ export default function Viewport({
     triggerCinematicCloseUp(moodType);
   }, [onMoodDelta, triggerCinematicCloseUp]);
 
-  // Smart transition/fluctuation watcher for mood changes
+  const prevMoodRef = useRef<MoodState | null>(null);
+
+  // Watch for mood state shifts from the chat companion to intelligently trigger a camera close-up
   useEffect(() => {
     if (!moodState) return;
-    
+
     if (prevMoodRef.current) {
       const prev = prevMoodRef.current;
       const diffs = {
@@ -480,8 +479,8 @@ export default function Viewport({
                                   Math.abs(diffs.sadness) >= 5.0;
 
       if (isSignificantChange) {
-        let dominantMood: 'joy' | 'sadness' | 'anger' | 'none' = 'none';
-        
+        let dominantMood: 'joy' | 'sadness' | 'anger' | 'talklean' | 'none' = 'none';
+
         // Target which mood went up or changed most
         const maxDelta = Math.max(
           Math.abs(diffs.happiness),
@@ -489,8 +488,12 @@ export default function Viewport({
           Math.abs(diffs.anger)
         );
 
-        if (maxDelta === Math.abs(diffs.happiness) && moodState.happiness > 50) {
-          dominantMood = 'joy';
+        if (maxDelta === Math.abs(diffs.happiness)) {
+          if (diffs.happiness > 0 && moodState.happiness > 50) {
+            dominantMood = 'joy';
+          } else if (diffs.happiness < 0 && moodState.sadness > 40) {
+            dominantMood = 'sadness';
+          }
         } else if (maxDelta === Math.abs(diffs.sadness) && moodState.sadness > 40) {
           dominantMood = 'sadness';
         } else if (maxDelta === Math.abs(diffs.anger) && moodState.anger > 40) {
@@ -502,7 +505,7 @@ export default function Viewport({
         }
       }
     }
-    
+
     prevMoodRef.current = { ...moodState };
   }, [moodState, triggerCinematicCloseUp]);
 
@@ -878,6 +881,7 @@ export default function Viewport({
   useEffect(() => {
     if (externalActiveClipName) {
       setActiveClipName(externalActiveClipName);
+
       if (onExternalClipPlayed) {
         onExternalClipPlayed();
       }
@@ -1086,25 +1090,33 @@ export default function Viewport({
             let localY = 0.1;
             let localZ = 1.15;
 
-            if (cin.moodType === 'anger') {
+            if (cin.moodType === 'talklean') {
+              // Talk-Lean camera zoom-in/closeup: close to face with a delicate breath sway
+              const elapsed = (Date.now() - cin.startTime) / 1000;
+              const swayX = Math.sin(elapsed * 1.5) * 0.008;
+              const swayY = Math.cos(elapsed * 1.0) * 0.006;
+              localX = swayX;
+              localY = 0.01 + swayY; // keep it level with eyes/mouth instead of too high
+              localZ = 0.58; // slightly further back so the face is beautifully framed and not cut off
+            } else if (cin.moodType === 'anger') {
               // Shaking close-up camera on anger wave
               const shakeScale = 0.02 * cin.progress;
               const shakeX = (Math.random() - 0.5) * shakeScale;
               const shakeY = (Math.random() - 0.5) * shakeScale;
               localX = shakeX;
               localY = 0.12 + shakeY;
-              localZ = 0.82; // Intense close-up depth
+              localZ = 0.65; // closer intense close-up depth
             } else if (cin.moodType === 'sadness') {
               // Melancholic cinematic looking slightly from the side (3/4 face profile)
-              localX = 0.42;
-              localY = 0.25;
-              localZ = 1.25;
+              localX = 0.35;
+              localY = 0.2;
+              localZ = 0.9;
             } else if (cin.moodType === 'joy') {
-              // Celebratory slow circular orbit orbit pan
-              const orbitR = 1.3;
+              // Celebratory slow circular orbit orbit pan but closer too
+              const orbitR = 0.9;
               const theta = cin.extraAngle;
-              localX = Math.sin(theta) * 0.6;
-              localY = 0.15;
+              localX = Math.sin(theta) * 0.4;
+              localY = 0.1;
               localZ = Math.cos(theta) * orbitR;
             }
 
@@ -3896,123 +3908,145 @@ export default function Viewport({
       )}
 
       {/* Navigation Instruction Guide */}
-      <div className="absolute top-4 left-4 pointer-events-none flex flex-col gap-2 z-10">
-        <div className="bg-slate-900/90 backdrop-blur border border-slate-700/60 rounded-lg p-3 text-xs shadow-xl flex flex-col gap-1.5 text-slate-300 pointer-events-auto">
-          <div 
-            onClick={() => setIsNavCollapsed(!isNavCollapsed)}
-            className="flex items-center justify-between gap-4 text-slate-100 font-medium border-b border-slate-800 pb-1 cursor-pointer select-none group"
-          >
-            <div className="flex items-center gap-1.5">
-              <Move3d className="w-3.5 h-3.5 text-sky-400" />
-              <span>三维操作视图</span>
+      {(editorMode === 'edit-model' || editorMode === 'ai-companion') && (
+        <div className="absolute top-[62px] left-4 pointer-events-none flex flex-col gap-2 z-10">
+          <div className="bg-slate-900/90 backdrop-blur border border-slate-700/60 rounded-lg p-3 text-xs shadow-xl flex flex-col gap-1.5 text-slate-300 pointer-events-auto">
+            <div 
+              onClick={() => setIsNavCollapsed(!isNavCollapsed)}
+              className="flex items-center justify-between gap-4 text-slate-100 font-medium border-b border-slate-800 pb-1 cursor-pointer select-none group"
+            >
+              <div className="flex items-center gap-1.5">
+                <Move3d className="w-3.5 h-3.5 text-sky-400" />
+                <span>三维操作视图</span>
+              </div>
+              <span className="text-[10px] text-indigo-400 hover:text-indigo-200 transition font-mono">
+                {isNavCollapsed ? '展开 ↗' : '收起 ↘'}
+              </span>
             </div>
-            <span className="text-[10px] text-indigo-400 hover:text-indigo-200 transition font-mono">
-              {isNavCollapsed ? '展开 ↗' : '收起 ↘'}
+            {!isNavCollapsed && (
+              <div className="flex flex-col gap-1.5 animate-in fade-in duration-100 mt-1">
+                <p>🖱️ <strong className="text-slate-100">旋转相机</strong>: 鼠标左键 拖拽</p>
+                <p>🖱️ <strong className="text-slate-100">平移相机</strong>: 鼠标右键 或 Shift + 拖拽</p>
+                <p>🖱️ <strong className="text-slate-100">缩放视角</strong>: 滚轮滑动</p>
+                <p>🟢 <strong className="text-slate-100">骨骼节点</strong>: 绿圆球。鼠标左键点击可直接选中</p>
+                
+                <div className="border-t border-slate-800/60 my-1 pb-0.5" />
+                
+                {/* Show Skeleton Toggle */}
+                <div className="flex items-center justify-between gap-4 pointer-events-auto select-none">
+                  <span className="text-slate-400 font-medium text-[11px]">显示3D骨干框架</span>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={showSkeleton}
+                      onChange={(e) => setShowSkeleton(e.target.checked)}
+                      className="sr-only peer"
+                    />
+                    <div className="w-8 h-4 bg-slate-800 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-slate-300 after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-indigo-600 peer-checked:after:bg-white" />
+                  </label>
+                </div>
+
+                {/* Talk-Lean Close-up camera Trigger */}
+                <div className="flex items-center justify-between gap-4 pointer-events-auto select-none mt-1 border-t border-slate-800/50 pt-1.5 pb-0.5">
+                  <span className="text-slate-400 font-medium text-[11px] flex items-center gap-1">
+                    <Camera className="w-3 h-3 text-indigo-400" />
+                    <span>Talk-Lean 凑近特写</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => triggerCinematicCloseUp('talklean')}
+                    className="bg-indigo-600/20 hover:bg-indigo-600 hover:text-white border border-indigo-500/35 rounded-md px-2.5 py-1 text-[10px] text-indigo-300 font-bold cursor-pointer transition duration-150 active:scale-[0.95]"
+                  >
+                    {cinematicRef.current.active && cinematicRef.current.moodType === 'talklean' ? '🎬 特写中' : '🎬 瞬间凑近'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Paint weights brush status overlay */}
+      {editorMode === 'rigging' && isPaintingActive && (
+        <div className="absolute bottom-16 left-4 z-30 bg-amber-950/85 backdrop-blur border border-amber-800/50 rounded-lg p-3 text-xs shadow-xl flex flex-col gap-1 text-amber-200 select-none pointer-events-auto w-[240px]">
+          <div className="flex items-center gap-1.5 font-medium mb-1 border-b border-amber-900/60 pb-1 text-amber-100">
+            <Paintbrush className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
+            <span>毛刷权重粉刷活跃</span>
+          </div>
+          <p className="opacity-90">按住 <strong>鼠标左键 拖动</strong> 涂抹权重</p>
+          <p className="opacity-90">当前选定骨骼: <strong className="text-white">{joints.find(j => j.id === selectedJointId)?.name || '未选择'}</strong></p>
+        </div>
+      )}
+
+      {/* Cinematic Camera Hud Panel */}
+      {(editorMode === 'edit-model' || editorMode === 'ai-companion') && (
+        <div className="absolute bottom-4 left-4 bg-slate-900/95 backdrop-blur-sm border border-indigo-500/30 rounded-lg p-3 text-xs shadow-2xl flex flex-col gap-2 text-slate-300 pointer-events-auto w-[240px] z-10 transition-all duration-300 select-none animate-in fade-in duration-300">
+          <div 
+            onClick={() => setIsCinematicCollapsed(!isCinematicCollapsed)}
+            className="flex items-center justify-between gap-4 text-slate-100 font-bold border-b border-indigo-500/20 pb-1.5 cursor-pointer group"
+          >
+            <div className="flex items-center gap-1.5 text-indigo-400 group-hover:text-indigo-300 transition">
+              <Camera className="w-3.5 h-3.5 text-indigo-400 animate-pulse" />
+              <span>🎥 AI 智能镜头运镜系统</span>
+            </div>
+            <span className="text-[10px] text-slate-500 font-mono hover:text-slate-300">
+              {isCinematicCollapsed ? '展开 ↗' : '收起 ↘'}
             </span>
           </div>
-          {!isNavCollapsed && (
-            <div className="flex flex-col gap-1.5 animate-in fade-in duration-100 mt-1">
-              <p>🖱️ <strong className="text-slate-100">旋转相机</strong>: 鼠标左键 拖拽</p>
-              <p>🖱️ <strong className="text-slate-100">平移相机</strong>: 鼠标右键 或 Shift + 拖拽</p>
-              <p>🖱️ <strong className="text-slate-100">缩放视角</strong>: 滚轮滑动</p>
-              <p>🟢 <strong className="text-slate-100">骨骼节点</strong>: 绿圆球。鼠标左键点击可直接选中</p>
+          
+          {!isCinematicCollapsed && (
+            <div className="flex flex-col gap-2 mt-1 animate-in fade-in duration-200">
+              <p className="text-[11px] text-slate-400 leading-normal">
+                检测人物 <strong>表情/心情剧烈过渡</strong> 时，镜头会自动捕获面部/头部特写，配合环境光影完成专业运镜。
+              </p>
               
-              <div className="border-t border-slate-800/60 my-1 pb-0.5" />
-              <div className="flex items-center justify-between gap-4 pointer-events-auto select-none mt-0.5">
-                <span className="text-slate-400 font-medium text-[11px]">显示3D骨干框架</span>
-                <label className="relative inline-flex items-center cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={showSkeleton}
-                    onChange={(e) => setShowSkeleton(e.target.checked)}
-                    className="sr-only peer"
-                  />
-                  <div className="w-8 h-4 bg-slate-800 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-slate-300 after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-indigo-600 peer-checked:after:bg-white" />
-                </label>
+              <div className="flex items-center justify-between bg-slate-950 p-1.5 rounded border border-slate-850">
+                <span className="text-slate-500 text-[10px]">当前运镜状态</span>
+                {cinematicRef.current.active ? (
+                  <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-1.5 py-0.5 rounded-md font-semibold text-[10px] flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping inline-block" />
+                    特写中 ({cinematicRef.current.moodType === 'joy' ? '😊 狂喜' : (cinematicRef.current.moodType === 'anger' ? '😡 暴怒' : (cinematicRef.current.moodType === 'sadness' ? '😢 悲伤' : '🎬 凑近'))})
+                  </span>
+                ) : (
+                  <span className="text-slate-500 text-[10px]">标准监视</span>
+                )}
               </div>
+
+              {/* Quick Test Controls */}
+              <div className="flex flex-col gap-1 mt-1">
+                <span className="text-[10px] text-slate-500 font-bold font-mono uppercase tracking-wider">运镜测试预览:</span>
+                <div className="grid grid-cols-3 gap-1">
+                  <button
+                    type="button"
+                    onClick={() => handleManualMoodTrigger('joy')}
+                    className="bg-amber-500/10 hover:bg-amber-500/20 hover:border-amber-400/40 border border-amber-500/25 rounded py-1 text-[10px] text-amber-200 font-bold cursor-pointer text-center transition active:scale-[0.96]"
+                  >
+                    😊 狂喜
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleManualMoodTrigger('anger')}
+                    className="bg-red-500/10 hover:bg-red-500/20 hover:border-red-400/40 border border-red-500/25 rounded py-1 text-[10px] text-red-200 font-bold cursor-pointer text-center transition active:scale-[0.96]"
+                  >
+                    😡 暴怒
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleManualMoodTrigger('sadness')}
+                    className="bg-blue-500/10 hover:bg-blue-500/20 hover:border-blue-400/40 border border-blue-500/25 rounded py-1 text-[10px] text-blue-200 font-bold cursor-pointer text-center transition active:scale-[0.96]"
+                  >
+                    😢 悲伤
+                  </button>
+                </div>
+              </div>
+
+              <p className="text-[8.5px] text-slate-500 leading-normal mt-1 border-t border-slate-850 pt-1">
+                * 心情波动（单项变化大于5点）时将自动触发运镜机制，特写镜头与伴侣心情深度挂钩。
+              </p>
             </div>
           )}
         </div>
-
-        {editorMode === 'rigging' && isPaintingActive && (
-          <div className="bg-amber-950/85 backdrop-blur border border-amber-800/50 rounded-lg p-3 text-xs shadow-xl flex flex-col gap-1 text-amber-200">
-            <div className="flex items-center gap-1.5 font-medium mb-1 border-b border-amber-900/60 pb-1 text-amber-100">
-              <Paintbrush className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
-              <span>毛刷权重粉刷活跃</span>
-            </div>
-            <p className="opacity-90">按住 <strong>鼠标左键 拖动</strong> 涂抹权重</p>
-            <p className="opacity-90">当前选定骨骼: <strong className="text-white">{joints.find(j => j.id === selectedJointId)?.name || '未选择'}</strong></p>
-          </div>
-        )}
-      </div>
-
-      {/* Cinematic Camera Hud Panel */}
-      <div className="absolute bottom-4 left-4 bg-slate-900/95 backdrop-blur-sm border border-indigo-500/30 rounded-lg p-3 text-xs shadow-2xl flex flex-col gap-2 text-slate-300 pointer-events-auto w-[240px] z-10 transition-all duration-300 select-none animate-in fade-in duration-300">
-        <div 
-          onClick={() => setIsCinematicCollapsed(!isCinematicCollapsed)}
-          className="flex items-center justify-between gap-4 text-slate-100 font-bold border-b border-indigo-500/20 pb-1.5 cursor-pointer group"
-        >
-          <div className="flex items-center gap-1.5 text-indigo-400 group-hover:text-indigo-300 transition">
-            <Camera className="w-3.5 h-3.5 text-indigo-400 animate-pulse" />
-            <span>🎥 AI 智能镜头运镜系统</span>
-          </div>
-          <span className="text-[10px] text-slate-500 font-mono hover:text-slate-300">
-            {isCinematicCollapsed ? '展开 ↗' : '收起 ↘'}
-          </span>
-        </div>
-        
-        {!isCinematicCollapsed && (
-          <div className="flex flex-col gap-2 mt-1 animate-in fade-in duration-200">
-            <p className="text-[11px] text-slate-400 leading-normal">
-              检测人物 <strong>表情/心情剧烈过渡</strong> 时，镜头会自动捕获面部/头部特写，配合环境光影完成专业运镜。
-            </p>
-            
-            <div className="flex items-center justify-between bg-slate-950 p-1.5 rounded border border-slate-850">
-              <span className="text-slate-500 text-[10px]">当前运镜状态</span>
-              {cinematicRef.current.active ? (
-                <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-1.5 py-0.5 rounded-md font-semibold text-[10px] flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping inline-block" />
-                  特写中 ({cinematicRef.current.moodType === 'joy' ? '😊 狂喜' : cinematicRef.current.moodType === 'anger' ? '😡 暴怒' : '😢 悲伤'})
-                </span>
-              ) : (
-                <span className="text-slate-500 text-[10px]">标准监视</span>
-              )}
-            </div>
-
-            {/* Quick Test Controls */}
-            <div className="flex flex-col gap-1 mt-1">
-              <span className="text-[10px] text-slate-500 font-bold font-mono uppercase tracking-wider">运镜测试预览:</span>
-              <div className="grid grid-cols-3 gap-1">
-                <button
-                  type="button"
-                  onClick={() => handleManualMoodTrigger('joy')}
-                  className="bg-amber-500/10 hover:bg-amber-500/20 hover:border-amber-400/40 border border-amber-500/25 rounded py-1 text-[10px] text-amber-200 font-bold cursor-pointer text-center transition active:scale-[0.96]"
-                >
-                  😊 狂喜特写
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleManualMoodTrigger('anger')}
-                  className="bg-red-500/10 hover:bg-red-500/20 hover:border-red-400/40 border border-red-500/25 rounded py-1 text-[10px] text-red-200 font-bold cursor-pointer text-center transition active:scale-[0.96]"
-                >
-                  😡 暴怒聚焦
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleManualMoodTrigger('sadness')}
-                  className="bg-blue-500/10 hover:bg-blue-500/20 hover:border-blue-400/40 border border-blue-500/25 rounded py-1 text-[10px] text-blue-200 font-bold cursor-pointer text-center transition active:scale-[0.96]"
-                >
-                  😢 悲伤特写
-                </button>
-              </div>
-            </div>
-
-            <p className="text-[8.5px] text-slate-500 leading-normal mt-1 border-t border-slate-850 pt-1 leading-normal">
-              * 当在 AI 伴侣聊天框回复导致数值突变 5 点以上，该运镜会自动无缝触发。
-            </p>
-          </div>
-        )}
-      </div>
+      )}
 
       {/* Diagnostic viewport footer panels (Count stats of meshes) */}
       <div className="absolute bottom-4 right-4 bg-slate-900/85 backdrop-blur-sm border border-slate-800 text-[10px] font-mono rounded px-3 py-2 text-slate-400 shadow flex gap-4 pointer-events-none">
