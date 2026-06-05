@@ -1,1 +1,17 @@
 @import "tailwindcss";
+
+@keyframes floatBubble {
+  0% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-8px);
+  }
+  100% {
+    transform: translateY(0px);
+  }
+}
+
+.animate-float-bubble {
+  animation: floatBubble 3s ease-in-out infinite;
+}

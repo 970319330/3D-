@@ -1,11 +1,18 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Bot, Send, Settings, Sparkles, AlertCircle, RefreshCw, Eye, EyeOff, User, Film, HelpCircle, Sliders, Play, Trash2, Volume2, VolumeX } from 'lucide-react';
-import { MoodState, MoodDelta } from '../types';
-import MoodPanel from './MoodPanel';
-import { getMoodLabel, getMoodEmoji } from '../utils/moodEngine';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { Bot, Send, Settings, Sparkles, AlertCircle, RefreshCw, Eye, EyeOff, User, Film, HelpCircle, Sliders, Play, Trash2, Volume2, VolumeX, Heart } from 'lucide-react';
+import {
+  EmotionEngine,
+  perceiveFromText,
+  buildEmotionContext,
+  injectToSystemPrompt,
+  pickAnimationByEmotion,
+  PERSONALITY_PRESETS,
+  findClosestEmotionLabel,
+} from '../emotion';
+import type { EmotionContext, EmotionPersonality } from '../types';
 
 interface LLMConfig {
-  provider: 'gemini' | 'deepseek' | 'custom';
+  provider: 'gemini' | 'deepseek' | 'qwen' | 'custom';
   apiKey: string;
   baseUrl: string;
   model: string;
@@ -19,45 +26,48 @@ interface Message {
   animation?: string;
   error?: boolean;
   timestamp: Date;
-  moodDelta?: MoodDelta;
   isProactive?: boolean;
 }
 
 interface LLMCompanionProps {
   detectedClips: string[];
   onTriggerAnimation: (clipName: string) => void;
-  moodState: MoodState;
-  onMoodDelta: (delta: MoodDelta) => void;
-  moodEventTrigger?: number;
+  onStateChange?: (state: { latestReply: string | null; isTyping: boolean; isProactiveThinking: boolean }) => void;
 }
 
-const DEFAULT_SYSTEM_INSTRUCTION = "你是一个充满活力、有温度的三维手办伴侣、陪伴小精灵。请用亲切、拟人化、简短的语气与用户进行角色扮演互动，每次回答控制在100字以内。";
+const DEFAULT_SYSTEM_INSTRUCTION = "你是一个三维手办伴侣、陪伴小精灵。用拟人化、简短的语气与用户互动，每次回答控制在100字以内。";
+
+// 挂机时间阈值：5分钟无用户交互后进入idle状态
+const IDLE_TIMEOUT = 1 * 60 * 1000; // 300000ms
 
 export default function LLMCompanion({
   detectedClips,
   onTriggerAnimation,
-  moodState,
-  onMoodDelta,
-  moodEventTrigger = 0,
+  onStateChange
 }: LLMCompanionProps) {
   // Stored state settings
-  const [provider, setProvider] = useState<'gemini' | 'deepseek' | 'custom'>(() => {
-    return (localStorage.getItem('ai_provider') as 'gemini' | 'deepseek' | 'custom') || 'gemini';
+  const [provider, setProvider] = useState<'gemini' | 'deepseek' | 'qwen' | 'custom'>(() => {
+    return (localStorage.getItem('ai_provider') as 'gemini' | 'deepseek' | 'qwen' | 'custom') || 'gemini';
   });
 
   const [apiKey, setApiKey] = useState(() => {
-    return localStorage.getItem(`ai_key_${provider}`) || '';
+    const saved = localStorage.getItem(`ai_key_${provider}`);
+    if (saved) return saved;
+    if (provider === 'qwen') return 'sk-a16630bdca2841cbb25a974a934e35e6';
+    return '';
   });
 
   const [baseUrl, setBaseUrl] = useState(() => {
     if (provider === 'gemini') return '';
     if (provider === 'deepseek') return 'https://api.deepseek.com';
+    if (provider === 'qwen') return 'https://dashscope.aliyuncs.com/compatible-mode/v1';
     return localStorage.getItem('ai_base_url') || 'https://api.openai.com/v1';
   });
 
   const [model, setModel] = useState(() => {
     if (provider === 'gemini') return 'gemini-3.5-flash';
-    if (provider === 'deepseek') return 'deepseek-chat';
+    if (provider === 'deepseek') return 'deepseek-v4-flash';
+    if (provider === 'qwen') return 'qwen-max';
     return localStorage.getItem('ai_model') || 'gpt-4o-mini';
   });
 
@@ -78,6 +88,59 @@ export default function LLMCompanion({
     return localStorage.getItem('ai_selected_voice') || 'Cherry';
   });
 
+  // ========== Emotion Engine ==========
+  const emotionEngineRef = useRef<EmotionEngine | null>(null);
+  const [emotionContext, setEmotionContext] = useState<EmotionContext | null>(null);
+  const [emotionLabel, setEmotionLabel] = useState<string>('neutral');
+  const [emotionPersonality, setEmotionPersonality] = useState<EmotionPersonality>(() => {
+    const saved = localStorage.getItem('ai_emotion_personality');
+    if (saved) {
+      try { return JSON.parse(saved) as EmotionPersonality; } catch { /* ignore */ }
+    }
+    return PERSONALITY_PRESETS.cheerful;
+  });
+
+  // 初始化 / 恢复 EmotionEngine
+  useEffect(() => {
+    const engine = new EmotionEngine(emotionPersonality);
+    const savedState = localStorage.getItem('ai_emotion_state');
+    if (savedState) {
+      engine.deserialize(savedState);
+    }
+    emotionEngineRef.current = engine;
+    engine.start(1000);
+
+    // 初始情绪上下文
+    setEmotionContext(buildEmotionContext(engine.state));
+    setEmotionLabel(findClosestEmotionLabel(engine.state.current));
+
+    // 定时更新 UI 中的情绪显示
+    const uiUpdater = setInterval(() => {
+      if (emotionEngineRef.current) {
+        setEmotionContext(buildEmotionContext(emotionEngineRef.current.state));
+        setEmotionLabel(findClosestEmotionLabel(emotionEngineRef.current.state.current));
+      }
+    }, 5000);
+
+    return () => {
+      engine.stop();
+      clearInterval(uiUpdater);
+      // 持久化
+      localStorage.setItem('ai_emotion_state', engine.serialize());
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 人格切换时重新初始化引擎
+  useEffect(() => {
+    if (emotionEngineRef.current) {
+      emotionEngineRef.current.setPersonality(emotionPersonality, true);
+      setEmotionContext(buildEmotionContext(emotionEngineRef.current.state));
+      setEmotionLabel(findClosestEmotionLabel(emotionEngineRef.current.state.current));
+      localStorage.setItem('ai_emotion_personality', JSON.stringify(emotionPersonality));
+      localStorage.setItem('ai_emotion_state', emotionEngineRef.current.serialize());
+    }
+  }, [emotionPersonality]);
+
   const [isPlayingAudio, setIsPlayingAudio] = useState<string | null>(null);
 
   // UI state managers
@@ -89,14 +152,9 @@ export default function LLMCompanion({
   // Proactive chat state
   const [isProactiveThinking, setIsProactiveThinking] = useState<boolean>(false);
   const lastProactiveTimeRef = useRef<number>(0);
-  const proactiveCooldownRef = useRef<number>(30000); // 30s min between proactive chats
-  const moodPanelRef = useRef<HTMLDivElement>(null);
+  const lastUserActivityRef = useRef<number>(Date.now()); // 记录最后一次用户交互时间
 
-  // Refs for values used inside proactive interval (to avoid resetting the interval on every change)
-  const moodStateRef = useRef(moodState);
-  useEffect(() => { moodStateRef.current = moodState; }, [moodState]);
-
-  // Stable refs for config values needed in timer callbacks
+  // Stable refs for config values and states needed in timer callbacks
   const configRef = useRef({ provider, apiKey, baseUrl, model, systemInstruction, useVoice, dashscopeApiKey, selectedVoice });
   useEffect(() => {
     configRef.current = { provider, apiKey, baseUrl, model, systemInstruction, useVoice, dashscopeApiKey, selectedVoice };
@@ -119,6 +177,97 @@ export default function LLMCompanion({
   useEffect(() => { messagesLenRef.current = messages.length; }, [messages.length]);
   const detectedClipsRef = useRef(detectedClips);
   useEffect(() => { detectedClipsRef.current = detectedClips; }, [detectedClips]);
+
+  const isTypingRef = useRef(isTyping);
+  useEffect(() => { isTypingRef.current = isTyping; }, [isTyping]);
+
+  const isProactiveThinkingRef = useRef(isProactiveThinking);
+  useEffect(() => { isProactiveThinkingRef.current = isProactiveThinking; }, [isProactiveThinking]);
+
+  const messagesRef = useRef(messages);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
+
+  // Find latest AI reply text for 3D Space speech bubble
+  const latestReply = useMemo(() => {
+    const aiMsgs = messages.filter(m => m.sender === 'ai');
+    return aiMsgs.length > 0 ? aiMsgs[aiMsgs.length - 1].text : null;
+  }, [messages]);
+
+  // Synthesis engine for clean soft feedback chime
+  const playSoftSynthChime = useCallback(() => {
+    try {
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioContextClass) return;
+      
+      const ctx = new AudioContextClass();
+      if (ctx.state === 'suspended') {
+        ctx.resume();
+      }
+
+      const now = ctx.currentTime;
+
+      // Soft synth tone generator helper
+      const playTone = (freq: number, startTime: number, duration: number) => {
+        const osc = ctx.createOscillator();
+        osc.type = 'triangle'; // Warm organic base
+        osc.frequency.setValueAtTime(freq, startTime);
+
+        // Lowpass filter to avoid abrasive digital harmonics
+        const filter = ctx.createBiquadFilter();
+        filter.type = 'lowpass';
+        filter.frequency.setValueAtTime(freq * 1.5, startTime);
+        filter.Q.setValueAtTime(0.8, startTime);
+
+        // Amplitude gain envelope (Soft attack + Exponential decay)
+        const gainNode = ctx.createGain();
+        gainNode.gain.setValueAtTime(0, startTime);
+        gainNode.gain.linearRampToValueAtTime(0.06, startTime + 0.04);
+        gainNode.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
+
+        // Connect graph
+        osc.connect(filter);
+        filter.connect(gainNode);
+        gainNode.connect(ctx.destination);
+
+        osc.start(startTime);
+        osc.stop(startTime + duration);
+      };
+
+      // Play soft arpeggiator (E-major Pentatonic scale segment)
+      playTone(659.25, now, 1.0);        // E5
+      playTone(880.00, now + 0.08, 0.9);   // A5
+      playTone(1109.73, now + 0.16, 0.82); // C#6
+      playTone(1318.51, now + 0.24, 0.7);  // E6
+
+    } catch (e) {
+      console.warn('Web Audio playback failed or blocked by autoplay restrictions:', e);
+    }
+  }, []);
+
+  // Monitor when a new AI message ID is received to trigger audio cue
+  const lastPlayedAiMsgRef = useRef<string | null>(null);
+  useEffect(() => {
+    const aiMsgs = messages.filter(m => m.sender === 'ai');
+    if (aiMsgs.length > 0) {
+      const latestAi = aiMsgs[aiMsgs.length - 1];
+      // Skip playing for the initial welcome message, and don't re-trigger for same msg ID
+      if (latestAi.id !== 'welcome' && latestAi.id !== lastPlayedAiMsgRef.current) {
+        lastPlayedAiMsgRef.current = latestAi.id;
+        playSoftSynthChime();
+      }
+    }
+  }, [messages, playSoftSynthChime]);
+
+  // Bubble up current state for 3D Viewport presentation
+  useEffect(() => {
+    if (onStateChange) {
+      onStateChange({
+        latestReply,
+        isTyping,
+        isProactiveThinking
+      });
+    }
+  }, [latestReply, isTyping, isProactiveThinking, onStateChange]);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -144,8 +293,15 @@ export default function LLMCompanion({
       });
 
       if (!response.ok) {
-        const errData = await response.json();
-        throw new Error(errData?.error || '阿里云语音合成中继请求失败');
+        const errText = await response.text();
+        let errMsg = '阿里云语音合成中继请求失败';
+        try {
+          const parsedErr = JSON.parse(errText);
+          errMsg = parsedErr?.error || errMsg;
+        } catch {
+          errMsg = errText || `HTTP 错误 ${response.status}`;
+        }
+        throw new Error(errMsg);
       }
 
       const blob = await response.blob();
@@ -177,7 +333,11 @@ export default function LLMCompanion({
   // Synchronize dynamic keys and config structures on provider shift
   useEffect(() => {
     localStorage.setItem('ai_provider', provider);
-    const savedKey = localStorage.getItem(`ai_key_${provider}`) || '';
+    let savedKey = localStorage.getItem(`ai_key_${provider}`) || '';
+    if (!savedKey && provider === 'qwen') {
+      savedKey = 'sk-a16630bdca2841cbb25a974a934e35e6';
+      localStorage.setItem(`ai_key_${provider}`, savedKey);
+    }
     setApiKey(savedKey);
 
     if (provider === 'gemini') {
@@ -186,6 +346,9 @@ export default function LLMCompanion({
     } else if (provider === 'deepseek') {
       setBaseUrl('https://api.deepseek.com');
       setModel('deepseek-chat');
+    } else if (provider === 'qwen') {
+      setBaseUrl('https://dashscope.aliyuncs.com/compatible-mode/v1');
+      setModel('qwen-max');
     } else {
       const savedUrl = localStorage.getItem('ai_base_url') || 'https://api.openai.com/v1';
       const savedModel = localStorage.getItem('ai_model') || 'gpt-4o-mini';
@@ -201,7 +364,7 @@ export default function LLMCompanion({
     localStorage.setItem('ai_use_voice', String(useVoice));
     localStorage.setItem('ai_dashscope_key', dashscopeApiKey);
     localStorage.setItem('ai_selected_voice', selectedVoice);
-    if (provider === 'custom') {
+    if (provider === 'custom' || provider === 'qwen') {
       localStorage.setItem('ai_base_url', baseUrl);
       localStorage.setItem('ai_model', model);
     }
@@ -224,132 +387,95 @@ export default function LLMCompanion({
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isTyping, isProactiveThinking]);
 
-  // Proactive chat timer — check every 15 seconds (stable interval, never reset)
+  // Proactive chat timer — check every 30 seconds for idle state
   useEffect(() => {
     const interval = setInterval(() => {
       const now = Date.now();
-      if (now - lastProactiveTimeRef.current < proactiveCooldownRef.current) return;
-      if (isTyping || isProactiveThinking) return;
+      if (isTypingRef.current || isProactiveThinkingRef.current) return;
 
-      const mood = moodStateRef.current;
+      // 检查用户是否处于idle状态（超过IDLE_TIMEOUT时间无交互）
+      const isIdle = now - lastUserActivityRef.current >= IDLE_TIMEOUT;
+      if (!isIdle) return;
+
+      // 每次触发前至少间隔30秒（防止过于频繁）
+      if (now - lastProactiveTimeRef.current < 30000) return;
+
+      lastProactiveTimeRef.current = now;
+
       const clips = detectedClipsRef.current;
       const cfg = configRef.current;
-      const label = getMoodLabel(mood);
-      const isStrongMood = mood.happiness > 75 || mood.happiness < 25 ||
-                           mood.energy > 75 || mood.energy < 25 ||
-                           mood.anger > 60 || mood.sadness > 60;
 
-      if (isStrongMood && messagesLenRef.current > 1) {
-        lastProactiveTimeRef.current = now;
+      // 使用情绪驱动的主动发言等级，而非固定阈值
+      const ctx = emotionEngineRef.current
+        ? buildEmotionContext(emotionEngineRef.current.state)
+        : null;
+      const proactivity = ctx?.proactivityLevel ?? 0.3;
 
-        (async () => {
-          setIsProactiveThinking(true);
+      // 低于阈值则跳过此次主动发言
+      if (proactivity < 0.15) return;
+
+      // 心情低落 + 高唤醒 → 缩短间隔（更频繁寻求互动）
+      const minInterval = proactivity > 0.6 ? 15000 : 30000;
+      if (now - lastProactiveTimeRef.current < minInterval) return;
+
+      const emotionPrompt = ctx
+        ? injectToSystemPrompt(cfg.systemInstruction, ctx)
+        : cfg.systemInstruction;
+
+      const historyPayload = messagesRef.current
+        .filter(msg => msg.sender === 'user' || msg.sender === 'ai')
+        .map(msg => ({
+          role: msg.sender === 'user' ? 'user' : 'model',
+          text: msg.text
+        }));
+
+      (async () => {
+        setIsProactiveThinking(true);
+        try {
+          const resp = await fetch('/api/llm/proactive-chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              provider: cfg.provider,
+              apiKey: cfg.apiKey,
+              baseUrl: cfg.baseUrl,
+              model: cfg.model,
+              systemInstruction: emotionPrompt,
+              animations: clips,
+              emotionContext: ctx?.padDescription ?? '',
+              history: historyPayload,
+            })
+          });
+          if (!resp.ok) return;
+          const respText = await resp.text();
+          let data: any = null;
           try {
-            const resp = await fetch('/api/llm/proactive-chat', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                provider: cfg.provider,
-                apiKey: cfg.apiKey,
-                baseUrl: cfg.baseUrl,
-                model: cfg.model,
-                systemInstruction: cfg.systemInstruction,
-                moodState: mood,
-                moodLabel: label,
-                animations: clips
-              })
-            });
-            if (!resp.ok) return;
-            const data = await resp.json();
-            const moodDelta = data?.moodDelta || {};
-            if (Object.keys(moodDelta).length > 0) {
-              onMoodDelta(moodDelta);
-            }
-            if (data?.animation && clips.includes(data.animation)) {
-              onTriggerAnimation(data.animation);
-            }
-            const aiMsg: Message = {
-              id: crypto.randomUUID(),
-              sender: 'ai',
-              text: data?.reply || '...',
-              animation: data?.animation || '',
-              timestamp: new Date(),
-              moodDelta,
-              isProactive: true
-            };
-            setMessages(prev => [...prev, aiMsg]);
-            if (cfg.useVoice && data?.reply) {
-              playTextSpeech(data.reply, aiMsg.id);
-            }
-          } catch (_) { /* silent */ }
-          finally { setIsProactiveThinking(false); }
-        })();
-      }
-    }, 15000);
+            data = JSON.parse(respText);
+          } catch {
+            data = { reply: respText || '...', animation: '' };
+          }
+          if (data?.animation && clips.includes(data.animation)) {
+            onTriggerAnimation(data.animation);
+          }
+          const aiMsg: Message = {
+            id: crypto.randomUUID(),
+            sender: 'ai',
+            text: data?.reply || '...',
+            animation: data?.animation || '',
+            timestamp: new Date(),
+            isProactive: true
+          };
+          setMessages(prev => [...prev, aiMsg]);
+          if (cfg.useVoice && data?.reply) {
+            playTextSpeech(data.reply, aiMsg.id);
+          }
+        } catch (_) { /* silent */ }
+        finally { setIsProactiveThinking(false); }
+      })();
+    }, 30000); // 每30秒检查一次
     return () => clearInterval(interval);
     // Stable deps — all dynamic values read via refs to avoid restarting the interval
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Immediate proactive trigger when MoodEngine fires a threshold event (energy=0, etc.)
-  // Bypasses user-activity cooldown — threshold events are emotional moments that need immediate response
-  useEffect(() => {
-    if (moodEventTrigger === 0) return;
-    if (isTyping || isProactiveThinking) return;
-
-    const mood = moodStateRef.current;
-    const clips = detectedClipsRef.current;
-    const cfg = configRef.current;
-    const label = getMoodLabel(mood);
-    const isStrongMood = mood.happiness > 75 || mood.happiness < 25 ||
-                         mood.energy > 75 || mood.energy < 25 ||
-                         mood.anger > 60 || mood.sadness > 60;
-    if (!isStrongMood || messagesLenRef.current <= 1) return;
-
-    lastProactiveTimeRef.current = Date.now();
-
-    (async () => {
-      setIsProactiveThinking(true);
-      try {
-        const resp = await fetch('/api/llm/proactive-chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            provider: cfg.provider,
-            apiKey: cfg.apiKey,
-            baseUrl: cfg.baseUrl,
-            model: cfg.model,
-            systemInstruction: cfg.systemInstruction,
-            moodState: mood,
-            moodLabel: label,
-            animations: clips
-          })
-        });
-        if (!resp.ok) return;
-        const data = await resp.json();
-        const moodDelta = data?.moodDelta || {};
-        if (Object.keys(moodDelta).length > 0) {
-          onMoodDelta(moodDelta);
-        }
-        if (data?.animation && clips.includes(data.animation)) {
-          onTriggerAnimation(data.animation);
-        }
-        const aiMsg: Message = {
-          id: crypto.randomUUID(),
-          sender: 'ai',
-          text: data?.reply || '...',
-          animation: data?.animation || '',
-          timestamp: new Date(),
-          moodDelta,
-          isProactive: true
-        };
-        setMessages(prev => [...prev, aiMsg]);
-        if (cfg.useVoice && data?.reply) {
-          playTextSpeech(data.reply, aiMsg.id);
-        }
-      } catch (_) { /* silent */ }
-      finally { setIsProactiveThinking(false); }
-    })();
-  }, [moodEventTrigger]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Handle LLM API query
   const handleSendMessage = async (e: React.FormEvent) => {
@@ -358,6 +484,24 @@ export default function LLMCompanion({
 
     const userText = inputMessage.trim();
     setInputMessage('');
+
+    // 更新最后用户活动时间
+    lastUserActivityRef.current = Date.now();
+
+    // 情绪感知：分析用户输入
+    const emotionEvent = perceiveFromText(userText);
+    if (emotionEvent && emotionEngineRef.current) {
+      emotionEngineRef.current.applyEvent(emotionEvent);
+      emotionEngineRef.current.recordSnapshot(emotionEvent.label);
+    }
+
+    // 生成带情绪上下文的 system prompt
+    const currentEmotionCtx = emotionEngineRef.current
+      ? buildEmotionContext(emotionEngineRef.current.state)
+      : null;
+    const emotionPrompt = currentEmotionCtx
+      ? injectToSystemPrompt(systemInstruction, currentEmotionCtx)
+      : systemInstruction;
 
     // Append user message immediately
     const userMsg: Message = {
@@ -369,8 +513,12 @@ export default function LLMCompanion({
     setMessages(prev => [...prev, userMsg]);
     setIsTyping(true);
 
-    // Reset proactive cooldown since user is actively chatting
-    lastProactiveTimeRef.current = Date.now();
+    const historyPayload = messages
+      .filter(msg => msg.sender === 'user' || msg.sender === 'ai')
+      .map(msg => ({
+        role: msg.sender === 'user' ? 'user' : 'model',
+        text: msg.text
+      }));
 
     try {
       const response = await fetch('/api/llm/chat', {
@@ -383,28 +531,38 @@ export default function LLMCompanion({
           apiKey,
           baseUrl,
           model,
-          systemInstruction,
+          systemInstruction: emotionPrompt,
           prompt: userText,
           animations: detectedClips,
-          moodState: moodState
+          history: historyPayload,
         })
       });
 
+      const responseText = await response.text();
+      let resData: any = null;
+
       if (!response.ok) {
-        const errData = await response.json();
-        throw new Error(errData?.error || '接口请求失败');
+        let errMsg = '接口请求失败';
+        try {
+          const parsedErr = JSON.parse(responseText);
+          errMsg = parsedErr?.error || errMsg;
+        } catch {
+          errMsg = responseText || `HTTP 错误 ${response.status}`;
+        }
+        throw new Error(errMsg);
       }
 
-      const resData = await response.json();
+      try {
+        resData = JSON.parse(responseText);
+      } catch {
+        resData = {
+          reply: responseText || '没有给出有效的文字回复。',
+          animation: ''
+        };
+      }
 
       const aiReply = resData?.reply || '没有给出有效的文字回复。';
       const triggeredAnim = resData?.animation || '';
-      const moodDelta = resData?.moodDelta || {};
-
-      // Apply mood delta from LLM response
-      if (Object.keys(moodDelta).length > 0) {
-        onMoodDelta(moodDelta);
-      }
 
       // Append AI response
       const aiMsg: Message = {
@@ -413,7 +571,6 @@ export default function LLMCompanion({
         text: aiReply,
         animation: triggeredAnim,
         timestamp: new Date(),
-        moodDelta
       };
       setMessages(prev => [...prev, aiMsg]);
 
@@ -423,8 +580,18 @@ export default function LLMCompanion({
       }
 
       // If animation was detected and exists in available clips, play it
-      if (triggeredAnim && detectedClips.includes(triggeredAnim)) {
-        onTriggerAnimation(triggeredAnim);
+      // otherwise fallback to emotion-based selection
+      let finalAnim = triggeredAnim;
+      if (!finalAnim || !detectedClips.includes(finalAnim)) {
+        if (emotionEngineRef.current && detectedClips.length > 0) {
+          finalAnim = pickAnimationByEmotion(
+            detectedClips,
+            emotionEngineRef.current.state.current,
+          ) ?? '';
+        }
+      }
+      if (finalAnim && detectedClips.includes(finalAnim)) {
+        onTriggerAnimation(finalAnim);
       }
 
     } catch (err: any) {
@@ -442,14 +609,33 @@ export default function LLMCompanion({
     }
   };
 
+  // 情绪光晕颜色
+  const emotionGlowColor = (() => {
+    if (!emotionLabel) return '#818cf8';
+    const label = emotionLabel.toLowerCase();
+    if (label.includes('joy') || label.includes('excited') || label.includes('happy') || label.includes('energetic'))
+      return '#fbbf24';
+    if (label.includes('sad') || label.includes('angry') || label.includes('depressed') || label.includes('anxious'))
+      return '#ef4444';
+    if (label.includes('calm') || label.includes('relaxed') || label.includes('peaceful') || label.includes('content'))
+      return '#34d399';
+    return '#818cf8';
+  })();
+
   return (
     <div className="flex flex-col h-full bg-[#08101c]/90 border border-slate-800/80 rounded-xl overflow-hidden shadow-2xl relative">
 
       {/* Mini Titlebar Header */}
       <div className="bg-[#0c1626] border-b border-slate-800 px-4 py-3 flex items-center justify-between shrink-0 select-none">
         <div className="flex items-center gap-2">
-          <div className="bg-indigo-600/20 p-1.5 rounded-lg border border-indigo-500/30">
-            <Bot className="w-4 h-4 text-indigo-400 animate-pulse" />
+          <div className="bg-indigo-600/20 p-1.5 rounded-lg border border-indigo-500/30 relative">
+            <Bot className="w-4 h-4 text-indigo-400" />
+            <span
+              className="absolute inset-0 rounded-lg opacity-40 animate-pulse"
+              style={{
+                background: `radial-gradient(circle, ${emotionGlowColor} 0%, transparent 70%)`,
+              }}
+            />
           </div>
           <div className="flex flex-col">
             <div className="flex items-center gap-1.5">
@@ -458,7 +644,17 @@ export default function LLMCompanion({
                 {provider}
               </span>
             </div>
-            <span className="text-[9px] text-slate-500 font-mono">Real-time Semantic Animation Driver</span>
+            <div className="flex items-center gap-1.5">
+              <span className="text-[9px] text-slate-500 font-mono">
+                {emotionContext?.toneGuide?.slice(0, 30) ?? 'Semantic Animation Driver'}
+              </span>
+              {emotionLabel && emotionLabel !== 'neutral' && (
+                <span className="text-[8px] bg-pink-500/10 text-pink-400 border border-pink-500/20 px-1 py-0 rounded font-mono flex items-center gap-0.5">
+                  <Heart className="w-2 h-2" />
+                  {emotionLabel}
+                </span>
+              )}
+            </div>
           </div>
         </div>
 
@@ -485,11 +681,6 @@ export default function LLMCompanion({
         </div>
       </div>
 
-      {/* Mood Panel — always visible above messages */}
-      <div ref={moodPanelRef} className="px-3 pt-3 pb-1 shrink-0">
-        <MoodPanel mood={moodState} onMoodDelta={onMoodDelta} />
-      </div>
-
       {/* Model settings panels overlay */}
       {showSettings ? (
         <div className="flex flex-col flex-1 p-4 bg-[#0a1221] overflow-y-auto custom-scrollbar border-b border-indigo-500/10 text-xs gap-4 relative z-20">
@@ -503,11 +694,11 @@ export default function LLMCompanion({
           {/* Provider Selection */}
           <div className="flex flex-col gap-1.5">
             <label className="text-slate-400 font-semibold leading-relaxed">对接主控端:</label>
-            <div className="grid grid-cols-3 gap-1.5">
+            <div className="grid grid-cols-4 gap-1.5">
               <button
                 type="button"
                 onClick={() => setProvider('gemini')}
-                className={`py-1.5 rounded border transition cursor-pointer font-medium ${
+                className={`py-1.5 rounded border transition cursor-pointer font-medium text-[10px] text-center ${
                   provider === 'gemini'
                     ? 'bg-indigo-600/25 border-indigo-500 text-indigo-200'
                     : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
@@ -518,7 +709,7 @@ export default function LLMCompanion({
               <button
                 type="button"
                 onClick={() => setProvider('deepseek')}
-                className={`py-1.5 rounded border transition cursor-pointer font-medium ${
+                className={`py-1.5 rounded border transition cursor-pointer font-medium text-[10px] text-center ${
                   provider === 'deepseek'
                     ? 'bg-indigo-600/25 border-indigo-500 text-indigo-200'
                     : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
@@ -528,14 +719,25 @@ export default function LLMCompanion({
               </button>
               <button
                 type="button"
+                onClick={() => setProvider('qwen')}
+                className={`py-1.5 rounded border transition cursor-pointer font-medium text-[10px] text-center ${
+                  provider === 'qwen'
+                    ? 'bg-indigo-600/25 border-indigo-500 text-indigo-200'
+                    : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Qwen
+              </button>
+              <button
+                type="button"
                 onClick={() => setProvider('custom')}
-                className={`py-1.5 rounded border transition cursor-pointer font-medium ${
+                className={`py-1.5 rounded border transition cursor-pointer font-medium text-[10px] text-center ${
                   provider === 'custom'
                     ? 'bg-indigo-600/25 border-indigo-500 text-indigo-200'
                     : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
                 }`}
               >
-                Custom OpenAI
+                Custom
               </button>
             </div>
           </div>
@@ -571,13 +773,13 @@ export default function LLMCompanion({
               <label className="text-slate-400 font-semibold">API 代理端点 (Base URL):</label>
               <input
                 type="text"
-                disabled={provider === 'deepseek'}
+                disabled={provider === 'deepseek' || provider === 'qwen'}
                 className={`w-full border rounded px-3 py-2 text-slate-200 font-mono focus:outline-none ${
-                  provider === 'deepseek'
+                  provider === 'deepseek' || provider === 'qwen'
                     ? 'bg-slate-850 border-slate-800 opacity-60'
                     : 'bg-[#070b13] border-slate-800 focus:border-indigo-600'
                 }`}
-                placeholder="例如: https://api.deepseek.com"
+                placeholder="例如: https://dashscope.aliyuncs.com/compatible-mode/v1"
                 value={baseUrl}
                 onChange={(e) => setBaseUrl(e.target.value)}
               />
@@ -609,6 +811,33 @@ export default function LLMCompanion({
               value={systemInstruction}
               onChange={(e) => setSystemInstruction(e.target.value)}
             />
+          </div>
+
+          {/* 情绪人格选择 */}
+          <div className="flex flex-col gap-1.5">
+            <label className="text-slate-400 font-semibold flex items-center gap-1">
+              <Heart className="w-3 h-3 text-pink-400" />
+              情绪人格 (Emotion Personality):
+            </label>
+            <div className="grid grid-cols-3 gap-1.5">
+              {Object.entries(PERSONALITY_PRESETS).map(([key, p]) => (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => setEmotionPersonality(p)}
+                  className={`py-1.5 rounded border transition cursor-pointer text-[10px] font-medium ${
+                    emotionPersonality.name === p.name
+                      ? 'bg-pink-600/25 border-pink-500 text-pink-200'
+                      : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  {p.name}
+                </button>
+              ))}
+            </div>
+            <span className="text-[9px] text-slate-600">
+              影响情绪响应速度、恢复速度和基线情绪倾向
+            </span>
           </div>
 
           <div className="flex items-center justify-between pb-1 border-b border-slate-800 mt-2">
@@ -713,7 +942,7 @@ export default function LLMCompanion({
                     <>
                       <Bot className="w-3 h-3 text-indigo-500" />
                       <span className="font-semibold text-indigo-400">
-                        {msg.isProactive ? `Companion (${getMoodEmoji(getMoodLabel(moodState))})` : 'Companion Avatar'}
+                        {msg.isProactive ? 'Companion (主动)' : 'Companion Avatar'}
                       </span>
                       {msg.isProactive && (
                         <span className="text-[8px] bg-amber-500/10 text-amber-400 border border-amber-500/20 px-1 py-0.5 rounded font-mono">
@@ -747,24 +976,6 @@ export default function LLMCompanion({
                         <Film className="w-3 h-3 text-indigo-400" />
                         <span>驱动骨络动画:</span>
                         <strong className="text-indigo-200">{msg.animation}</strong>
-                      </div>
-                    )}
-
-                    {/* Mood delta indicator */}
-                    {msg.moodDelta && Object.keys(msg.moodDelta).length > 0 && (
-                      <div className="mt-1.5 flex items-center gap-1.5 select-none text-[9px] text-slate-500 font-mono">
-                        <Sparkles className="w-2.5 h-2.5 text-emerald-400" />
-                        <span>心情变化: </span>
-                        {Object.entries(msg.moodDelta || {}).map(([key, val]) => {
-                          if (typeof val !== 'number') return null;
-                          const labels: Record<string, string> = { happiness: '快乐', energy: '精力', anger: '愤怒', sadness: '悲伤' };
-                          const sign = val > 0 ? '+' : '';
-                          return (
-                            <span key={key} className={val > 0 ? 'text-emerald-400' : 'text-red-400'}>
-                              {labels[key] || key}: {sign}{Math.round(val)}
-                            </span>
-                          );
-                        })}
                       </div>
                     )}
                   </div>

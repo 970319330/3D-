@@ -5,9 +5,8 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import * as THREE from 'three';
-import { EditorMode, JointNode, WeightBrushSettings, KeyframeData, MoodState, MoodDelta } from './types';
+import { EditorMode, JointNode, WeightBrushSettings, KeyframeData } from './types';
 import { getPresetSkeletons } from './utils/rigging';
-import { MoodEngine } from './utils/moodEngine';
 import Viewport from './components/Viewport';
 import PresetSelector from './components/PresetSelector';
 import SkeletonTree from './components/SkeletonTree';
@@ -39,6 +38,17 @@ export default function App() {
   const [customMtlFile, setCustomMtlFile] = useState<File | null>(null);
   const [customTextureFiles, setCustomTextureFiles] = useState<File[]>([]);
 
+  // AI Companion interaction states (for showing bubble on top of character's head)
+  const [aiCompanionState, setAiCompanionState] = useState<{
+    latestReply: string | null;
+    isTyping: boolean;
+    isProactiveThinking: boolean;
+  }>({
+    latestReply: null,
+    isTyping: false,
+    isProactiveThinking: false
+  });
+
   // Skeletal Bones state (Default start with empty state waiting for upload)
   const [joints, setJoints] = useState<JointNode[]>([]);
   const [selectedJointId, setSelectedJointId] = useState<string | null>(null);
@@ -59,31 +69,6 @@ export default function App() {
 
   // Auto-rig execution counter
   const [autoRigTrigger, setAutoRigTrigger] = useState<number>(0);
-
-  // Mood system state
-  const moodEngineRef = useRef<MoodEngine>(new MoodEngine());
-  const [moodState, setMoodState] = useState<MoodState>(moodEngineRef.current.getState());
-  const [moodEventTrigger, setMoodEventTrigger] = useState<number>(0); // increment on each threshold event
-
-  // Mood tick timer — runs every 1 second
-  useEffect(() => {
-    const interval = setInterval(() => {
-      const engine = moodEngineRef.current;
-      const events = engine.tick(1000);
-      setMoodState(engine.getState());
-
-      // Signal LLMCompanion to immediately check for proactive chat
-      if (events.length > 0) {
-        setMoodEventTrigger((prev: number) => prev + 1);
-      }
-    }, 1000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const handleMoodDelta = (delta: import('./types').MoodDelta) => {
-    moodEngineRef.current.applyDelta(delta);
-    setMoodState(moodEngineRef.current.getState());
-  };
 
   // Synchronously update 3D Viewport editorMode whenever modals or tabs change
   useEffect(() => {
@@ -273,9 +258,7 @@ export default function App() {
               <LLMCompanion
                 detectedClips={detectedClips}
                 onTriggerAnimation={setExternalActiveClipName}
-                moodState={moodState}
-                onMoodDelta={handleMoodDelta}
-                moodEventTrigger={moodEventTrigger}
+                onStateChange={setAiCompanionState}
               />
             </div>
           ) : (
@@ -427,9 +410,10 @@ export default function App() {
               onGltfClipsLoaded={setDetectedClips}
               externalActiveClipName={externalActiveClipName}
               onExternalClipPlayed={() => setExternalActiveClipName(null)}
-              moodState={moodState}
-              onMoodDelta={handleMoodDelta}
               importedClips={importedClips}
+              latestReply={aiCompanionState.latestReply}
+              isTyping={aiCompanionState.isTyping}
+              isProactiveThinking={aiCompanionState.isProactiveThinking}
             />
           </div>
 
