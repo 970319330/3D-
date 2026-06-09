@@ -368,32 +368,66 @@ async function startServer() {
         return res.status(400).json({ error: "语音合成文本内容不能为空。" });
       }
 
-      const response = await fetch("https://dashscope.aliyuncs.com/api/v1/services/audio/tts/speech-synthesizer", {
+      // Format voice correctly: capitalized (e.g. "Cherry", "Coco", "Bella", "Diane", "Abby", "Eric")
+      let finalVoice = "Cherry";
+      if (voice && typeof voice === "string") {
+        finalVoice = voice.charAt(0).toUpperCase() + voice.slice(1).toLowerCase();
+        // Exact overrides for known names if case matching is strict
+        const matches: Record<string, string> = {
+          "cherry": "Cherry",
+          "coco": "Coco",
+          "bella": "Bella",
+          "diane": "Diane",
+          "abby": "Abby",
+          "eric": "Eric"
+        };
+        if (matches[finalVoice.toLowerCase()]) {
+          finalVoice = matches[finalVoice.toLowerCase()];
+        }
+      }
+
+      // Simple language detection (English vs Chinese) to pass proper language_type
+      const isEnglish = /^[A-Za-z0-9\s!@#$%^&*()_+=-`~\\|';:"/.,?><]+$/.test(text);
+      const languageType = (finalVoice === "Diane" || isEnglish) ? "English" : "Chinese";
+
+      const apiResponse = await fetch("https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${finalKey}`
         },
         body: JSON.stringify({
-          model: "cosyvoice-v1",
+          model: "qwen3-tts-flash",
           input: {
-            text: text
-          },
-          parameters: {
-            speaker: voice || "loongying",
-            audio_format: "mp3",
-            sample_rate: 22050
+            text: text,
+            voice: finalVoice,
+            language_type: languageType
           }
         })
       });
 
-      if (!response.ok) {
-        const errText = await response.text();
-        return res.status(response.status).json({ error: `阿里云语音合成失败 (${response.status}): ${errText}` });
+      if (!apiResponse.ok) {
+        const errText = await apiResponse.text();
+        return res.status(apiResponse.status).json({ error: `阿里云语音合成失败 (${apiResponse.status}): ${errText}` });
       }
 
-      const buffer = await response.arrayBuffer();
-      res.setHeader("Content-Type", "audio/mpeg");
+      const json = await apiResponse.json();
+      const audioUrl = json?.output?.audio?.url || json?.output?.audio_url;
+
+      if (!audioUrl) {
+        return res.status(400).json({ 
+          error: "阿里云语音合成未返回音频文件地址。响应详情: " + JSON.stringify(json) 
+        });
+      }
+
+      // Fetch the actual audio binary
+      const audioResp = await fetch(audioUrl);
+      if (!audioResp.ok) {
+        return res.status(audioResp.status).json({ error: `下载语音合成音频流失败 (${audioResp.status})` });
+      }
+
+      const buffer = await audioResp.arrayBuffer();
+      res.setHeader("Content-Type", audioResp.headers.get("content-type") || "audio/mpeg");
       return res.send(Buffer.from(buffer));
 
     } catch (error: any) {

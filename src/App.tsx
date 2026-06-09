@@ -43,10 +43,14 @@ export default function App() {
     latestReply: string | null;
     isTyping: boolean;
     isProactiveThinking: boolean;
+    isSpeaking: boolean;
+    emotionLabel: string;
   }>({
     latestReply: null,
     isTyping: false,
-    isProactiveThinking: false
+    isProactiveThinking: false,
+    isSpeaking: false,
+    emotionLabel: 'neutral'
   });
 
   // Skeletal Bones state (Default start with empty state waiting for upload)
@@ -414,6 +418,8 @@ export default function App() {
               latestReply={aiCompanionState.latestReply}
               isTyping={aiCompanionState.isTyping}
               isProactiveThinking={aiCompanionState.isProactiveThinking}
+              isSpeaking={aiCompanionState.isSpeaking}
+              emotionLabel={aiCompanionState.emotionLabel}
             />
           </div>
 

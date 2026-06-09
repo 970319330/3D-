@@ -65,6 +65,62 @@ interface ViewportProps {
   latestReply?: string | null;
   isTyping?: boolean;
   isProactiveThinking?: boolean;
+  isSpeaking?: boolean;
+  emotionLabel?: string;
+}
+
+function getPhonemeFromChar(char: string): {
+  jawOpen: number;
+  mouthOpen: number;
+  mouthPucker: number;
+  mouthFunnel: number;
+  mouthSmile: number;
+} {
+  if (!char || /[\s,.\d?!"'，。！？：；“”‘’（）\-]/.test(char)) {
+    return { jawOpen: 0.1, mouthOpen: 0, mouthPucker: 0, mouthFunnel: 0, mouthSmile: 0 };
+  }
+
+  const c = char.toLowerCase();
+
+  // Simple English phonetics
+  if (/[aeiou]/.test(c)) {
+    if (c === 'a') return { jawOpen: 0.8, mouthOpen: 0.9, mouthPucker: 0, mouthFunnel: 0, mouthSmile: 0.2 };
+    if (c === 'e') return { jawOpen: 0.6, mouthOpen: 0.7, mouthPucker: 0, mouthFunnel: 0, mouthSmile: 0.4 };
+    if (c === 'i') return { jawOpen: 0.3, mouthOpen: 0.3, mouthPucker: 0, mouthFunnel: 0, mouthSmile: 0.84 };
+    if (c === 'o') return { jawOpen: 0.55, mouthOpen: 0.45, mouthPucker: 0, mouthFunnel: 0.9, mouthSmile: 0 };
+    if (c === 'u') return { jawOpen: 0.4, mouthOpen: 0.2, mouthPucker: 0.85, mouthFunnel: 0.5, mouthSmile: 0 };
+  }
+
+  // Chinese character mapping based on typical radical or pronunciation
+  const puckerChars = "入出不物五无务武舞木目模复夫辅负路录绿努怒女";
+  const funnelChars = "口红国火多夺朵偶欧后手收受走奏周粥落罗";
+  const smileChars = "一喜你极笑起气奇吉集记细洗西皮批平星形性莉丽立力里";
+  const openChars = "啊大好我说哈哈巴爸打他那拉卡沙杀抓沙爬马发拿沙";
+
+  if (puckerChars.includes(char)) {
+    return { jawOpen: 0.3, mouthOpen: 0.1, mouthPucker: 0.9, mouthFunnel: 0.4, mouthSmile: 0 };
+  }
+  if (funnelChars.includes(char)) {
+    return { jawOpen: 0.55, mouthOpen: 0.35, mouthPucker: 0.2, mouthFunnel: 0.95, mouthSmile: 0 };
+  }
+  if (smileChars.includes(char)) {
+    return { jawOpen: 0.25, mouthOpen: 0.2, mouthPucker: 0, mouthFunnel: 0, mouthSmile: 0.85 };
+  }
+  if (openChars.includes(char)) {
+    return { jawOpen: 0.85, mouthOpen: 0.85, mouthPucker: 0, mouthFunnel: 0, mouthSmile: 0.15 };
+  }
+
+  // Fallback default vowel/consonant oscillation so the mouth moves naturally
+  const seed = char.charCodeAt(0) % 4;
+  if (seed === 0) {
+    return { jawOpen: 0.6, mouthOpen: 0.7, mouthPucker: 0, mouthFunnel: 0.1, mouthSmile: 0.1 };
+  } else if (seed === 1) {
+    return { jawOpen: 0.3, mouthOpen: 0.25, mouthPucker: 0, mouthFunnel: 0, mouthSmile: 0.65 };
+  } else if (seed === 2) {
+    return { jawOpen: 0.4, mouthOpen: 0.3, mouthPucker: 0.75, mouthFunnel: 0.3, mouthSmile: 0 };
+  } else {
+    return { jawOpen: 0.55, mouthOpen: 0.45, mouthPucker: 0.1, mouthFunnel: 0.75, mouthSmile: 0.1 };
+  }
 }
 
 function findStandbyClipName(clips: THREE.AnimationClip[]): string {
@@ -141,10 +197,34 @@ export default function Viewport({
   importedClips,
   latestReply = null,
   isTyping = false,
-  isProactiveThinking = false
+  isProactiveThinking = false,
+  isSpeaking = false,
+  emotionLabel = 'neutral'
 }: ViewportProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  const companionFaceStateRef = useRef({
+    blinkTimer: 0,
+    nextBlinkTime: 3.5, // 3-6s
+    blinkDuration: 0.18, // 180ms
+    speechTime: 0,
+    // smoothed morph outputs
+    phonemeMouthOpen: 0,
+    phonemeJawOpen: 0,
+    phonemeMouthPucker: 0,
+    phonemeMouthFunnel: 0,
+    phonemeMouthSmile: 0,
+    // smoothed emotion outputs
+    emotionSmile: 0,
+    emotionFrown: 0,
+    emotionBrowUp: 0,
+    emotionBrowDown: 0,
+    emotionCheekPuff: 0,
+    // eye look smoothing
+    currentEyeX: 0,
+    currentEyeY: 0,
+  });
 
   // State for original GLTF model animations & showroom mode
   const [gltfClips, setGltfClips] = useState<THREE.AnimationClip[]>([]);
@@ -182,10 +262,12 @@ export default function Viewport({
     hdrPreset,
     customHdrFile,
     useHdrAsBackground,
-    showSkeleton: true,
+    showSkeleton: false,
     latestReply,
     isTyping,
-    isProactiveThinking
+    isProactiveThinking,
+    isSpeaking: false,
+    emotionLabel: 'neutral'
   });
 
   // Track if we need to rebuild the geometry or hierarchy
@@ -203,7 +285,7 @@ export default function Viewport({
   const [isNavCollapsed, setIsNavCollapsed] = useState<boolean>(true);
 
   // Show/Hide 3D Skeleton Visualizers
-  const [showSkeleton, setShowSkeleton] = useState<boolean>(true);
+  const [showSkeleton, setShowSkeleton] = useState<boolean>(false);
 
   // Update mutables to bypass useEffect re-binding latency in high-freq canvas interaction
   useEffect(() => {
@@ -226,9 +308,11 @@ export default function Viewport({
       showSkeleton,
       latestReply,
       isTyping,
-      isProactiveThinking
+      isProactiveThinking,
+      isSpeaking,
+      emotionLabel
     };
-  }, [joints, selectedJointId, editorMode, activeModelType, customModelFile, weightBrush, isPaintingActive, currentFrame, keyframes, isShowroomActive, isGltfAnimating, showroomSpeed, hdrPreset, customHdrFile, useHdrAsBackground, showSkeleton, latestReply, isTyping, isProactiveThinking]);
+  }, [joints, selectedJointId, editorMode, activeModelType, customModelFile, weightBrush, isPaintingActive, currentFrame, keyframes, isShowroomActive, isGltfAnimating, showroomSpeed, hdrPreset, customHdrFile, useHdrAsBackground, showSkeleton, latestReply, isTyping, isProactiveThinking, isSpeaking, emotionLabel]);
 
   // Handle auto-rig execution from props
   useEffect(() => {
@@ -697,11 +781,6 @@ export default function Viewport({
     const hemLight = new THREE.HemisphereLight('#818cf8', '#0f172a', 0.3); // Sky to ground lighting
     scene.add(hemLight);
 
-    // Dynamic Helpers
-    const gridHelper = new THREE.GridHelper(12, 24, '#3b82f6', '#1e293b');
-    gridHelper.position.y = -2;
-    scene.add(gridHelper);
-
     // Groups for visualizers
     const jointVisualizersGroup = new THREE.Group();
     const boneVisualizersGroup = new THREE.Group();
@@ -772,6 +851,9 @@ export default function Viewport({
         if (state.isShowroomActive && t.gltfMixer) {
           t.gltfMixer.update(delta * (state.isGltfAnimating ? state.showroomSpeed : 0));
         }
+
+        // Apply our custom dynamic blendshape system (blinking, eye look-at mouse, mouth sync)
+        updateCompanionDynamicBlendshapes(delta);
 
         if (!state.isShowroomActive) {
           // Apply manual rigging and bone transforms
@@ -997,6 +1079,205 @@ export default function Viewport({
   useEffect(() => {
     colorMeshByWeights();
   }, [selectedJointId, editorMode, joints]);
+
+  // Update Companion Dynamic Morph Targets, Pupil tracking, and Phonetic sync
+  function updateCompanionDynamicBlendshapes(delta: number) {
+    const state = stateRef.current;
+    const t = threeRef.current;
+    const fs = companionFaceStateRef.current;
+    if (!t) return;
+
+    // 1. Blink Cycle Engine
+    fs.blinkTimer += delta;
+    if (fs.blinkTimer >= fs.nextBlinkTime) {
+      fs.blinkTimer = 0;
+      fs.nextBlinkTime = 2.5 + Math.random() * 4.5; // Next random interval (2.5s - 7.0s)
+    }
+
+    let activeBlink = 0;
+    if (fs.blinkTimer < fs.blinkDuration) {
+      const halfBlink = fs.blinkDuration / 2;
+      if (fs.blinkTimer < halfBlink) {
+        activeBlink = fs.blinkTimer / halfBlink; // 0 to 1
+      } else {
+        activeBlink = 1.0 - (fs.blinkTimer - halfBlink) / halfBlink; // 1 to 0
+      }
+    }
+
+    // 2. Speech & Typing lip-sync syllable extraction
+    let targetPhoneme = {
+      jawOpen: 0.1, // subtle baseline
+      mouthOpen: 0,
+      mouthPucker: 0,
+      mouthFunnel: 0,
+      mouthSmile: 0
+    };
+
+    const isSpeaking = state.isSpeaking;
+    const isTyping = state.isTyping;
+
+    if (isSpeaking && state.latestReply) {
+      // Audio is streaming - process phonetic character synchronization
+      fs.speechTime += delta;
+      
+      const cleanText = state.latestReply.replace(/[\s\w.,/#!$%^&*;:{}=\-_`~()?"'，。！？：；“”‘’（）\-]/g, '');
+      const textToUse = cleanText.length > 0 ? cleanText : state.latestReply;
+      
+      // Map syllables at a speed of 5.5 chars per second (matches spoken rate)
+      const charIndex = Math.floor(fs.speechTime * 5.5) % textToUse.length;
+      const currentChar = textToUse[charIndex] || '';
+      
+      targetPhoneme = getPhonemeFromChar(currentChar);
+    } else if (isTyping) {
+      // Companion is typing/thinking - produce thoughtful chewing/muttering mouth movements
+      fs.speechTime += delta;
+      const cosVal = Math.cos(fs.speechTime * 15);
+      targetPhoneme = {
+        jawOpen: 0.15 + Math.max(0, cosVal) * 0.25,
+        mouthOpen: 0,
+        mouthPucker: Math.max(0, -cosVal) * 0.4,
+        mouthFunnel: 0,
+        mouthSmile: 0
+      };
+    } else {
+      fs.speechTime = 0; // reset
+    }
+
+    // Dampen standard vowel blendshape transformations gracefully (LERP mouth speed)
+    const lFactor = 0.22;
+    fs.phonemeJawOpen += (targetPhoneme.jawOpen - fs.phonemeJawOpen) * lFactor;
+    fs.phonemeMouthOpen += (targetPhoneme.mouthOpen - fs.phonemeMouthOpen) * lFactor;
+    fs.phonemeMouthPucker += (targetPhoneme.mouthPucker - fs.phonemeMouthPucker) * lFactor;
+    fs.phonemeMouthFunnel += (targetPhoneme.mouthFunnel - fs.phonemeMouthFunnel) * lFactor;
+    fs.phonemeMouthSmile += (targetPhoneme.mouthSmile - fs.phonemeMouthSmile) * lFactor;
+
+    // 3. Emotion-driven micro-expressions mappings
+    const emotion = (state.emotionLabel || 'neutral').toLowerCase();
+    
+    const cheerfulThemes = ['joy', 'happy', 'excited', 'energetic', 'cheerful', 'playful', 'teasing', 'cute', 'cheeky'];
+    const sadThemes = ['sad', 'sadness', 'gloomy', 'depressed', 'anxious', 'worried', 'afraid'];
+    const angryThemes = ['angry', 'irritated', 'furious', 'serious', 'focused'];
+    const calmThemes = ['calm', 'relaxed', 'content', 'at-ease', 'peaceful'];
+
+    let targetSmile = 0;
+    let targetFrown = 0;
+    let targetBrowUp = 0;
+    let targetBrowDown = 0;
+    let targetCheekPuff = 0;
+
+    if (cheerfulThemes.includes(emotion)) {
+      targetSmile = (emotion === 'playful' || emotion === 'cute' || emotion === 'cheeky') ? 0.35 : 0.85;
+      if (emotion === 'playful' || emotion === 'cute' || emotion === 'cheeky' || emotion === 'teasing') {
+        targetCheekPuff = 0.65;
+      }
+    } else if (sadThemes.includes(emotion)) {
+      targetFrown = 0.8;
+      targetBrowUp = 0.7;
+    } else if (angryThemes.includes(emotion)) {
+      targetBrowDown = 0.8;
+      targetFrown = 0.3;
+    } else if (calmThemes.includes(emotion)) {
+      targetSmile = 0.25; // elegant subtle cozy warm vibe
+    }
+
+    // Blend targets smoothly to eliminate jitter/snapping
+    const emoFactor = 0.12;
+    fs.emotionSmile += (targetSmile - fs.emotionSmile) * emoFactor;
+    fs.emotionFrown += (targetFrown - fs.emotionFrown) * emoFactor;
+    fs.emotionBrowUp += (targetBrowUp - fs.emotionBrowUp) * emoFactor;
+    fs.emotionBrowDown += (targetBrowDown - fs.emotionBrowDown) * emoFactor;
+    fs.emotionCheekPuff += (targetCheekPuff - fs.emotionCheekPuff) * emoFactor;
+
+    // 4. Smooth Pupil Eye Look-At Target (Smooth Mouse Tracking)
+    fs.currentEyeX += (t.mouse.x - fs.currentEyeX) * 0.15;
+    fs.currentEyeY += (t.mouse.y - fs.currentEyeY) * 0.15;
+
+    const lookX = fs.currentEyeX;
+    const lookY = fs.currentEyeY;
+
+    // Apply the computed influences onto any compatible meshes
+    const rootTarget = t.loadedGltfScene || t.mainMesh;
+    if (rootTarget) {
+      // Direct traversal for Morph Targets (Mesh / SkinnedMesh dictionary matching)
+      rootTarget.traverse((child) => {
+        if (child instanceof THREE.Mesh && child.morphTargetDictionary && child.morphTargetInfluences) {
+          const dict = child.morphTargetDictionary;
+          const influences = child.morphTargetInfluences;
+
+          const setInfluence = (key: string, value: number) => {
+            const idx = dict[key];
+            if (idx !== undefined) {
+              influences[idx] = value;
+            }
+          };
+
+          // A. Blink
+          setInfluence('eyeBlinkLeft', activeBlink);
+          setInfluence('eyeBlinkRight', activeBlink);
+
+          // B. Eye Pupils tracking look-at
+          setInfluence('eyeLookInLeft', lookX > 0 ? lookX : 0);
+          setInfluence('eyeLookOutLeft', lookX < 0 ? -lookX : 0);
+          setInfluence('eyeLookInRight', lookX < 0 ? -lookX : 0);
+          setInfluence('eyeLookOutRight', lookX > 0 ? lookX : 0);
+
+          // C. Phonetic syllable mouth-opening
+          setInfluence('jawOpen', fs.phonemeJawOpen);
+          setInfluence('mouthOpen', fs.phonemeMouthOpen);
+          setInfluence('mouthPucker', fs.phonemeMouthPucker);
+          setInfluence('mouthFunnel', fs.phonemeMouthFunnel);
+
+          // D. Emotional神态 structures
+          const totalSmile = Math.max(fs.phonemeMouthSmile, fs.emotionSmile);
+          setInfluence('mouthSmileLeft', totalSmile);
+          setInfluence('mouthSmileRight', totalSmile);
+          setInfluence('mouthFrownLeft', fs.emotionFrown);
+          setInfluence('mouthFrownRight', fs.emotionFrown);
+          setInfluence('browInnerUp', fs.emotionBrowUp);
+          setInfluence('browDownLeft', fs.emotionBrowDown);
+          setInfluence('browDownRight', fs.emotionBrowDown);
+          setInfluence('cheekPuff', fs.emotionCheekPuff);
+        }
+      });
+
+      // E. Independent skeletal eye rotation bones rotation
+      const leftEyeBones: THREE.Object3D[] = [];
+      const rightEyeBones: THREE.Object3D[] = [];
+
+      rootTarget.traverse((child) => {
+        if (child instanceof THREE.Bone || (child as any).isBone || child instanceof THREE.Mesh) {
+          const name = child.name.toLowerCase();
+          if (name.includes('eye')) {
+            // Filter non-eyeball bones like eyelids, eyelashes, brows
+            if (name.includes('brow') || name.includes('lid') || name.includes('lash') || name.includes('pupil_mesh_only')) return;
+            
+            if (name.includes('left') || name.endsWith('_l') || name.includes('eyeleft')) {
+              leftEyeBones.push(child);
+            } else if (name.includes('right') || name.endsWith('_r') || name.includes('eyeright')) {
+              rightEyeBones.push(child);
+            }
+          }
+        }
+      });
+
+      if (leftEyeBones.length > 0 || rightEyeBones.length > 0) {
+        const maxRotY = 0.28; // horizontal max yaw
+        const maxRotX = 0.18; // vertical max pitch
+
+        const targetRotY = lookX * maxRotY;
+        const targetRotX = -lookY * maxRotX;
+
+        leftEyeBones.forEach(bone => {
+          bone.rotation.y = targetRotY;
+          bone.rotation.x = targetRotX;
+        });
+        rightEyeBones.forEach(bone => {
+          bone.rotation.y = targetRotY;
+          bone.rotation.x = targetRotX;
+        });
+      }
+    }
+  }
 
   // Apply bone animation rotations or slider poses in real time
   function applyBoneTransforms() {

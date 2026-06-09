@@ -32,7 +32,7 @@ interface Message {
 interface LLMCompanionProps {
   detectedClips: string[];
   onTriggerAnimation: (clipName: string) => void;
-  onStateChange?: (state: { latestReply: string | null; isTyping: boolean; isProactiveThinking: boolean }) => void;
+  onStateChange?: (state: { latestReply: string | null; isTyping: boolean; isProactiveThinking: boolean; isSpeaking: boolean; emotionLabel: string }) => void;
 }
 
 const DEFAULT_SYSTEM_INSTRUCTION = "你是一个三维手办伴侣、陪伴小精灵。用拟人化、简短的语气与用户互动，每次回答控制在100字以内。";
@@ -264,10 +264,12 @@ export default function LLMCompanion({
       onStateChange({
         latestReply,
         isTyping,
-        isProactiveThinking
+        isProactiveThinking,
+        isSpeaking: !!isPlayingAudio,
+        emotionLabel
       });
     }
-  }, [latestReply, isTyping, isProactiveThinking, onStateChange]);
+  }, [latestReply, isTyping, isProactiveThinking, isPlayingAudio, emotionLabel, onStateChange]);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -884,12 +886,12 @@ export default function LLMCompanion({
               value={selectedVoice}
               onChange={(e) => setSelectedVoice(e.target.value)}
             >
-              <option value="Cherry">Cherry (经典甜美女声)</option>
-              <option value="Coco">Coco (活力女声)</option>
-              <option value="Bella">Bella (温暖女声)</option>
-              <option value="Diane">Diane (成熟英文女声)</option>
-              <option value="Abby">Abby (温柔童声)</option>
-              <option value="Eric">Eric (知性男声)</option>
+              <option value="Cherry">Cherry (芊悦 - 阳光积极、亲切自然，中英多语种女声)</option>
+              <option value="Coco">Coco (可可 - 活力女声，欢快活泼、元气满满)</option>
+              <option value="Bella">Bella (贝拉 - 温暖女声，温柔治愈、讲故事首选)</option>
+              <option value="Diane">Diane (黛安 - 成熟自信、流利顺畅纯正英文女声)</option>
+              <option value="Abby">Abby (艾比 - 温柔童声，软萌可爱、天真烂漫)</option>
+              <option value="Eric">Eric (艾瑞克 - 知性睿智、磁性沉稳纯正英文男声)</option>
             </select>
           </div>
 
